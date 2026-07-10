@@ -48,24 +48,15 @@ Sensitive reads are additionally constrained by the configured privacy policy. S
 
 ## Quick Start
 
-Prerequisites:
-
-- Rust stable with `rustfmt` and `clippy`
-- `cargo-audit` for the full local quality gate
-- An MCP server you can already run locally over stdio (any newline-delimited JSON-RPC MCP server works)
-
-Copy [examples/config.toml](examples/config.toml), point `[targets.example]` at your MCP server's command and args, then run:
+Install the prebuilt binary — no Rust toolchain required:
 
 ```bash
-git clone https://github.com/ieranama/discomcp.git
-cd discomcp
-cargo run -p discomcp -- profile example \
-  --config ./examples/config.toml \
-  --mode standard \
-  --goal "Understand this MCP, safely explore my accessible workspace, and generate an operational skill"
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.sh | sh
 ```
 
-For an installed binary, the equivalent command is:
+(Windows: `powershell -ExecutionPolicy Bypass -c "irm https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.ps1 | iex"`. All platform archives are on the [releases page](https://github.com/ieranama/discomcp/releases).)
+
+You'll also need an MCP server you can already run locally over stdio (any newline-delimited JSON-RPC MCP server works). Copy [examples/config.toml](examples/config.toml), point `[targets.example]` at that server's command and args, then run:
 
 ```bash
 discomcp profile example \
@@ -130,6 +121,16 @@ Every material claim in a generated profile carries one of these statuses:
 Inferences include their confidence, supporting evidence, source references, and contradictions. DiscoMCP does not present an inferred relationship as an observed fact.
 
 ## Development
+
+Want to contribute, or run an unreleased change? Build from source instead of installing the binary.
+
+Prerequisites: Rust stable with `rustfmt` and `clippy`, and `cargo-audit` for the full local quality gate.
+
+```bash
+git clone https://github.com/ieranama/discomcp.git
+cd discomcp
+cargo run -p discomcp -- profile example --config ./examples/config.toml --mode standard --goal "..."
+```
 
 Run the local quality gate before opening a pull request:
 
