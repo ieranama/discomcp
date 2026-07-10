@@ -12,6 +12,7 @@ edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
 authors = ["DiscoMCP Contributors"]
+repository = "https://github.com/ieranama/discomcp"
 
 [workspace.dependencies]
 async-trait = "0.1"
