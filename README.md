@@ -11,13 +11,13 @@
 
 </div>
 
+No agent should walk onto the dance floor blind — DiscoMCP checks the room, learns the moves, and only then cuts in.
+
 DiscoMCP turns an unknown Model Context Protocol (MCP) connection into a reusable, workspace-aware operational skill for AI agents.
 
 It connects to a target MCP, collects its declared capabilities and configured documentation, safely explores only permitted read or harmless computation paths, and produces a profile with a workspace-specific `SKILL.md`.
 
 > **Status:** Experimental. DiscoMCP supports real newline-delimited stdio MCP servers and provider-neutral command reasoning backends. It does not execute mutations, external actions, destructive operations, administrative operations, or arbitrary execution while onboarding a target. MCP protocol serving and HTTP transports remain future work.
-
-No agent should walk onto the dance floor blind — DiscoMCP checks the room, learns the moves, and only then cuts in.
 
 ## Why DiscoMCP
 
