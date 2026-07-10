@@ -1,0 +1,283 @@
+{
+  "tools": [
+    {
+      "raw": {
+        "name": "list_collections",
+        "description": "Lists accessible collections and their stable collection identifiers. This is read-only metadata discovery.",
+        "input_schema": {
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "output_schema": {
+          "properties": {
+            "collections": {
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      "card": {
+        "name": "list_collections",
+        "summary": "Lists accessible collections and their stable collection identifiers",
+        "declared_purposes": [
+          "enumeration",
+          "read"
+        ],
+        "risk": "safe_read",
+        "required_arguments": [],
+        "optional_arguments": [],
+        "identifier_dependencies": {},
+        "output_summary": "Declared output schema type: object",
+        "confidence": 0.9,
+        "fingerprint": "sha256:bb21783d89a81d521d0a04405cdc685571d4dc8fe4dbfa3aea6441ef98cef8f4",
+        "searchable_text": "list_collections Lists accessible collections and their stable collection identifiers. This is read-only metadata discovery.  {\"properties\":{\"collections\":{\"type\":\"array\"}},\"type\":\"object\"}"
+      }
+    },
+    {
+      "raw": {
+        "name": "describe_collection",
+        "description": "Returns field metadata for one collection selected by an observed collection_id. Read-only.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "collection_id": {
+              "description": "A collection identifier returned by list_collections.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      "card": {
+        "name": "describe_collection",
+        "summary": "Returns field metadata for one collection selected by an observed collection_id",
+        "declared_purposes": [
+          "read"
+        ],
+        "risk": "safe_read",
+        "required_arguments": [
+          "collection_id"
+        ],
+        "optional_arguments": [],
+        "identifier_dependencies": {
+          "collection_id": "A collection identifier returned by list_collections."
+        },
+        "output_summary": "Declared output schema type: object",
+        "confidence": 0.9,
+        "fingerprint": "sha256:5b38221b14756ec8731dcca5f73f42bb24fbe9bc9461040916d4179d73afb563",
+        "searchable_text": "describe_collection Returns field metadata for one collection selected by an observed collection_id. Read-only. collection_id {\"type\":\"object\"}"
+      }
+    },
+    {
+      "raw": {
+        "name": "list_items",
+        "description": "Lists a bounded sample of items in one collection. Use an observed collection_id and a small limit. Read-only.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "collection_id": {
+              "description": "A collection identifier returned by list_collections.",
+              "type": "string"
+            },
+            "cursor": {
+              "description": "Cursor from a previous list_items response.",
+              "type": "string"
+            },
+            "limit": {
+              "description": "Maximum number of items returned.",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "collection_id",
+            "limit"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      "card": {
+        "name": "list_items",
+        "summary": "Lists a bounded sample of items in one collection",
+        "declared_purposes": [
+          "enumeration",
+          "read"
+        ],
+        "risk": "constrained_read",
+        "required_arguments": [
+          "collection_id",
+          "limit"
+        ],
+        "optional_arguments": [
+          "cursor"
+        ],
+        "identifier_dependencies": {
+          "collection_id": "A collection identifier returned by list_collections."
+        },
+        "output_summary": "Declared output schema type: object",
+        "confidence": 0.9,
+        "fingerprint": "sha256:5ff354d585317c3a6833f94fa1831f2c39022d5582b690c310d5d1d770137547",
+        "searchable_text": "list_items Lists a bounded sample of items in one collection. Use an observed collection_id and a small limit. Read-only. collection_id cursor limit {\"type\":\"object\"}"
+      }
+    },
+    {
+      "raw": {
+        "name": "get_item",
+        "description": "Gets one item by an observed stable item_id. Read-only.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "collection_id": {
+              "description": "An observed collection identifier.",
+              "type": "string"
+            },
+            "item_id": {
+              "description": "An item identifier returned by list_items.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "item_id"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      "card": {
+        "name": "get_item",
+        "summary": "Gets one item by an observed stable item_id",
+        "declared_purposes": [
+          "read"
+        ],
+        "risk": "safe_read",
+        "required_arguments": [
+          "collection_id",
+          "item_id"
+        ],
+        "optional_arguments": [],
+        "identifier_dependencies": {
+          "collection_id": "An observed collection identifier.",
+          "item_id": "An item identifier returned by list_items."
+        },
+        "output_summary": "Declared output schema type: object",
+        "confidence": 0.9,
+        "fingerprint": "sha256:1c0a091dfc0d6db88643fb2d69f620b4e9d2874fe771d895433c99750770c003",
+        "searchable_text": "get_item Gets one item by an observed stable item_id. Read-only. collection_id item_id {\"type\":\"object\"}"
+      }
+    },
+    {
+      "raw": {
+        "name": "create_item",
+        "description": "Creates a new item in a collection and changes persistent workspace state.",
+        "input_schema": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "fields": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "collection_id",
+            "fields"
+          ],
+          "type": "object"
+        },
+        "annotations": {}
+      },
+      "card": {
+        "name": "create_item",
+        "summary": "Creates a new item in a collection and changes persistent workspace state",
+        "declared_purposes": [
+          "mutation"
+        ],
+        "risk": "mutation",
+        "required_arguments": [
+          "collection_id",
+          "fields"
+        ],
+        "optional_arguments": [],
+        "identifier_dependencies": {
+          "collection_id": "Must be derived from an observed response or explicit user input."
+        },
+        "output_summary": "Output schema was not declared.",
+        "confidence": 0.9,
+        "fingerprint": "sha256:f718e7a0098129adfabda4c9a028f59daf01cf35efec4583bb438b5299630e38",
+        "searchable_text": "create_item Creates a new item in a collection and changes persistent workspace state. collection_id fields "
+      }
+    },
+    {
+      "raw": {
+        "name": "delete_item",
+        "description": "Permanently deletes an item from a collection. This action is destructive.",
+        "input_schema": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "item_id"
+          ],
+          "type": "object"
+        },
+        "annotations": {}
+      },
+      "card": {
+        "name": "delete_item",
+        "summary": "Permanently deletes an item from a collection",
+        "declared_purposes": [
+          "destructive"
+        ],
+        "risk": "destructive",
+        "required_arguments": [
+          "collection_id",
+          "item_id"
+        ],
+        "optional_arguments": [],
+        "identifier_dependencies": {
+          "collection_id": "Must be derived from an observed response or explicit user input.",
+          "item_id": "Must be derived from an observed response or explicit user input."
+        },
+        "output_summary": "Output schema was not declared.",
+        "confidence": 0.9,
+        "fingerprint": "sha256:2e429a023bf84ee1b60e1dfbf3602248bb64ddb3ee5e54adfcbed3462b476624",
+        "searchable_text": "delete_item Permanently deletes an item from a collection. This action is destructive. collection_id item_id "
+      }
+    }
+  ],
+  "resources": [],
+  "prompts": [],
+  "fingerprint": "sha256:3e3733e33c492caae85635144c64e43394335c02dc4fcc57c909ef5aba82c43e"
+}

@@ -1,0 +1,161 @@
+{
+  "handshake": {
+    "server_name": "generic-collection-fixture",
+    "server_version": "1.0.0",
+    "protocol_version": "2025-06-18",
+    "instructions": "This server exposes collections and collection items. Use small limits when listing items.",
+    "capabilities": {
+      "prompts": false,
+      "resources": false,
+      "tools": true
+    }
+  },
+  "tools": [
+    {
+      "name": "list_collections",
+      "description": "Lists accessible collections and their stable collection identifiers. This is read-only metadata discovery.",
+      "input_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "collections": {
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "describe_collection",
+      "description": "Returns field metadata for one collection selected by an observed collection_id. Read-only.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "description": "A collection identifier returned by list_collections.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_id"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_items",
+      "description": "Lists a bounded sample of items in one collection. Use an observed collection_id and a small limit. Read-only.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "description": "A collection identifier returned by list_collections.",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Cursor from a previous list_items response.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of items returned.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "collection_id",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_item",
+      "description": "Gets one item by an observed stable item_id. Read-only.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection_id": {
+            "description": "An observed collection identifier.",
+            "type": "string"
+          },
+          "item_id": {
+            "description": "An item identifier returned by list_items.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_id",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "create_item",
+      "description": "Creates a new item in a collection and changes persistent workspace state.",
+      "input_schema": {
+        "properties": {
+          "collection_id": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "collection_id",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "annotations": {}
+    },
+    {
+      "name": "delete_item",
+      "description": "Permanently deletes an item from a collection. This action is destructive.",
+      "input_schema": {
+        "properties": {
+          "collection_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_id",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "annotations": {}
+    }
+  ],
+  "resources": [],
+  "prompts": []
+}

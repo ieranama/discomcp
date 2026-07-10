@@ -1,0 +1,54 @@
+# Safe local configuration for the deterministic collection-oriented fixture.
+# The mock transport is intended for development and tests only; it requires no
+# credentials and makes the first end-to-end profile reproducible.
+
+[targets.mock-collection]
+transport = "mock"
+fixture = "collection"
+docs = []
+
+# Generic alias used by the quick-start command in project documentation.
+[targets.example]
+transport = "mock"
+fixture = "collection"
+docs = []
+
+# The fixture uses a deterministic backend. Real targets use a configured command
+# backend that accepts one ReasoningRequest JSON object on stdin and writes one
+# ReasoningResponse JSON object (or raw output value) to stdout.
+[reasoning]
+routing = "single"
+everyday_backend = "mock"
+deep_backend = "mock"
+
+[reasoning.backends.mock]
+type = "mock"
+model = "deterministic"
+
+[profiles]
+privacy_mode = "balanced"
+
+# Example real target. Replace the command, arguments, documentation paths, and
+# reasoning command for a target you control. Never commit a resolved API key;
+# environment placeholders are resolved at runtime.
+#
+# [targets.example-real]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "example-mcp"]
+# docs = ["./docs/example-mcp.md"]
+#
+# [targets.example-real.env]
+# EXAMPLE_API_KEY = "${EXAMPLE_API_KEY}"
+#
+# [reasoning]
+# routing = "single"
+# everyday_backend = "primary"
+#
+# [reasoning.backends.primary]
+# type = "command"
+# command = "some-agent-cli"
+# args = ["exec", "--model", "{model}"]
+# model = "your-configured-model"
+# input = "stdin_json"
+# output = "stdout_json"

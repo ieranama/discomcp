@@ -1,0 +1,82 @@
+[
+  {
+    "objective": "Discover accessible workspace structures before selecting a collection.",
+    "unresolved_question": "Which collections are available to this user?",
+    "selected_tool": "list_collections",
+    "arguments": {},
+    "expected_information": "A bounded structural observation that resolves the stated question.",
+    "expected_information_gain": 0.85,
+    "confidence": 0.92,
+    "alternatives": [],
+    "argument_provenance": [],
+    "stop": false
+  },
+  {
+    "objective": "Sample one observed collection with the minimum useful limit.",
+    "unresolved_question": "What item shape and identifiers occur in an accessible collection?",
+    "selected_tool": "list_items",
+    "arguments": {
+      "collection_id": "projects",
+      "limit": 2
+    },
+    "expected_information": "A bounded structural observation that resolves the stated question.",
+    "expected_information_gain": 0.85,
+    "confidence": 0.92,
+    "alternatives": [],
+    "argument_provenance": [
+      {
+        "json_pointer": "/collection_id",
+        "source": {
+          "kind": "observed",
+          "observation_id": "probe-001",
+          "json_pointer": "/collections/0/id"
+        }
+      }
+    ],
+    "stop": false
+  },
+  {
+    "objective": "Read one observed item to verify the detail shape and collection linkage.",
+    "unresolved_question": "How does an item relate to its collection and nested values?",
+    "selected_tool": "get_item",
+    "arguments": {
+      "collection_id": "projects",
+      "item_id": "project-alpha"
+    },
+    "expected_information": "A bounded structural observation that resolves the stated question.",
+    "expected_information_gain": 0.85,
+    "confidence": 0.92,
+    "alternatives": [],
+    "argument_provenance": [
+      {
+        "json_pointer": "/collection_id",
+        "source": {
+          "kind": "observed",
+          "observation_id": "probe-001",
+          "json_pointer": "/collections/0/id"
+        }
+      },
+      {
+        "json_pointer": "/item_id",
+        "source": {
+          "kind": "observed",
+          "observation_id": "probe-002",
+          "json_pointer": "/items/0/id"
+        }
+      }
+    ],
+    "stop": false
+  },
+  {
+    "objective": "Stop once the initial read workflow is supported by observed identifiers.",
+    "unresolved_question": "No further safe probe is required for the initial skill.",
+    "arguments": {},
+    "expected_information": "",
+    "expected_information_gain": 0.0,
+    "confidence": 0.95,
+    "alternatives": [],
+    "argument_provenance": [],
+    "stop": true,
+    "stop_reason": "Initial structures and a safe identifier traversal were observed."
+  }
+]

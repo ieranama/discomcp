@@ -1,0 +1,47 @@
+{
+  "probe-001": {
+    "collections": [
+      {
+        "description": "Long-lived work initiatives",
+        "id": "projects",
+        "name": "Projects"
+      },
+      {
+        "description": "Trackable units of work",
+        "id": "tickets",
+        "name": "Tickets"
+      }
+    ]
+  },
+  "probe-002": {
+    "items": [
+      {
+        "id": "project-alpha",
+        "name": "Alpha",
+        "owner_id": "member-1",
+        "status": "active"
+      },
+      {
+        "id": "project-beta",
+        "name": "Beta",
+        "owner_id": "member-2",
+        "status": "archived"
+      }
+    ],
+    "next_cursor": null
+  },
+  "probe-003": {
+    "item": {
+      "collection_id": "projects",
+      "id": "project-alpha",
+      "name": "Alpha",
+      "owner": {
+        "access_token": "[REDACTED_SECRET]",
+        "display_name": "Owner One",
+        "email": "[REDACTED_EMAIL]",
+        "id": "member-1"
+      },
+      "status": "active"
+    }
+  }
+}

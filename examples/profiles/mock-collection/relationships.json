@@ -1,0 +1,48 @@
+[
+  {
+    "from_structure": "item",
+    "to_structure": "collections",
+    "relationship_type": "references",
+    "via_fields": [
+      "collection_id"
+    ],
+    "evidence": {
+      "claim": "`item.collection_id` appears to reference another discovered structure.",
+      "status": "inferred",
+      "confidence": 0.7,
+      "evidence": [
+        {
+          "status": "inferred",
+          "source": "observation:probe-003"
+        }
+      ],
+      "source_references": [
+        "observation:probe-003"
+      ],
+      "contradictions": []
+    }
+  },
+  {
+    "from_structure": "projects",
+    "to_structure": "owner",
+    "relationship_type": "references",
+    "via_fields": [
+      "owner_id"
+    ],
+    "evidence": {
+      "claim": "`projects.owner_id` appears to reference another discovered structure.",
+      "status": "inferred",
+      "confidence": 0.7,
+      "evidence": [
+        {
+          "status": "inferred",
+          "source": "observation:probe-002"
+        }
+      ],
+      "source_references": [
+        "observation:probe-002"
+      ],
+      "contradictions": []
+    }
+  }
+]

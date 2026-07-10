@@ -1,0 +1,42 @@
+{
+  "dimensions": [
+    {
+      "name": "discoverability",
+      "assessment": "available",
+      "confidence": 0.9,
+      "evidence": []
+    },
+    {
+      "name": "schema_quality",
+      "assessment": "structured",
+      "confidence": 0.8,
+      "evidence": []
+    },
+    {
+      "name": "read_safety",
+      "assessment": "safe paths available",
+      "confidence": 0.85,
+      "evidence": []
+    },
+    {
+      "name": "structure_clarity",
+      "assessment": "observed",
+      "confidence": 0.85,
+      "evidence": []
+    },
+    {
+      "name": "relationship_clarity",
+      "assessment": "inferred",
+      "confidence": 0.7,
+      "evidence": []
+    }
+  ],
+  "strengths": [
+    "4 safe or bounded onboarding tool(s) are available."
+  ],
+  "weaknesses": [],
+  "safety_concerns": [
+    "2 tool(s) are documented but blocked from onboarding execution."
+  ],
+  "blockers": []
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "claim": {
+      "claim": "The target returned two accessible collection descriptors with stable identifiers.",
+      "status": "observed",
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "status": "observed",
+          "source": "observation:probe-001"
+        }
+      ],
+      "source_references": [
+        "observation:probe-001"
+      ],
+      "contradictions": []
+    },
+    "unresolved_question": "Which collections are available to this user?"
+  },
+  {
+    "claim": {
+      "claim": "The bounded item sample confirms item identifiers, status values, and an owner reference field.",
+      "status": "observed",
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "status": "observed",
+          "source": "observation:probe-002"
+        }
+      ],
+      "source_references": [
+        "observation:probe-002"
+      ],
+      "contradictions": []
+    },
+    "unresolved_question": "What item shape and identifiers occur in an accessible collection?"
+  },
+  {
+    "claim": {
+      "claim": "The detail response confirms an item carries its collection_id and a nested owner object.",
+      "status": "observed",
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "status": "observed",
+          "source": "observation:probe-003"
+        }
+      ],
+      "source_references": [
+        "observation:probe-003"
+      ],
+      "contradictions": []
+    },
+    "unresolved_question": "How does an item relate to its collection and nested values?"
+  }
+]
