@@ -50,11 +50,14 @@ Prerequisites:
 
 - Rust stable with `rustfmt` and `clippy`
 - `cargo-audit` for the full local quality gate
+- An MCP server you can already run locally over stdio (any newline-delimited JSON-RPC MCP server works)
+
+Copy [examples/config.toml](examples/config.toml), point `[targets.example]` at your MCP server's command and args, then run:
 
 ```bash
-git clone https://github.com/<owner>/discomcp.git
+git clone https://github.com/ieranama/discomcp.git
 cd discomcp
-cargo run -p discomcp -- profile mock-collection \
+cargo run -p discomcp -- profile example \
   --config ./examples/config.toml \
   --mode standard \
   --goal "Understand this MCP, safely explore my accessible workspace, and generate an operational skill"
@@ -63,7 +66,7 @@ cargo run -p discomcp -- profile mock-collection \
 For an installed binary, the equivalent command is:
 
 ```bash
-discomcp profile mock-collection \
+discomcp profile example \
   --config ./examples/config.toml \
   --mode standard \
   --goal "Understand this MCP, safely explore my accessible workspace, and generate an operational skill"
@@ -77,11 +80,9 @@ Profiles are written below `.discomcp/profiles/<target-id>/`. The canonical outp
 
 `SKILL.md` and `AGENTS.md` are generated exports of that canonical state.
 
-A complete, redacted fixture profile is checked in at [examples/profiles/mock-collection](examples/profiles/mock-collection/), including its generated [SKILL.md](examples/profiles/mock-collection/SKILL.md).
-
 ## Configuration
 
-Start with [examples/config.toml](examples/config.toml). Targets are owned by DiscoMCP; it does not inherit servers from another agent host automatically. `mock` provides a deterministic local fixture. `stdio` launches a real MCP subprocess and communicates using newline-delimited JSON-RPC.
+Start with [examples/config.toml](examples/config.toml). Targets are owned by DiscoMCP; it does not inherit servers from another agent host automatically. `stdio` launches a real MCP subprocess and communicates using newline-delimited JSON-RPC.
 
 ```toml
 [targets.example]

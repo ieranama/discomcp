@@ -1,9 +1,0 @@
-{
-  "target_id": "mock-collection",
-  "profile_version": "0.1.0",
-  "generated_at_unix_seconds": 1783671787,
-  "target_fingerprint": "sha256:3e3733e33c492caae85635144c64e43394335c02dc4fcc57c909ef5aba82c43e",
-  "mode": "standard",
-  "goal": "Understand the collection-oriented fixture and generate an operational skill",
-  "static_discovery_complete": true
-}

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-10
+
+### Changed
+
+- `examples/config.toml` and the Quick Start now configure a real stdio MCP target instead of the deterministic mock fixture; the mock transport remains internal to the test suite only.
+
+### Removed
+
+- Checked-in `examples/profiles/mock-collection` example profile output (generated artifact, not source).
+
+## [0.1.0] - 2026-07-10
+
 ### Added
 
 - Initial open-source project scaffold and dual licensing.
