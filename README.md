@@ -17,7 +17,7 @@ DiscoMCP turns an unknown Model Context Protocol (MCP) connection into a reusabl
 
 It connects to a target MCP, collects its declared capabilities and configured documentation, safely explores only permitted read or harmless computation paths, and produces a profile with a workspace-specific `SKILL.md`.
 
-> DiscoMCP makes your agent be the one in the room you would like to dance with — not the one who shows up, starts flailing at every button on the mixing desk, and calls it improvisation. It learns the playlist first, asks before it touches the decks, and never, ever pulls the fire alarm to see what happens.
+DiscoMCP makes your agent be the one in the room you would like to dance with — not the one who shows up, starts flailing at every button on the mixing desk, and calls it improvisation. It learns the playlist first, asks before it touches the decks, and never, ever pulls the fire alarm to see what happens.
 
 ## Why DiscoMCP
 
