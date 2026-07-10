@@ -7,7 +7,7 @@
 [![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release)](https://github.com/ieranama/discomcp/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
-[![🪩 LinkedIn](https://img.shields.io/badge/🪩_LinkedIn-I%C3%B1igo_Era%C3%B1a-0A66C2?logo=linkedin&logoColor=white)](http://linkedin.com/in/inigo-erana/)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Follow-0A66C2?logo=linkedin&logoColor=white)](http://linkedin.com/in/inigo-erana/)
 
 </div>
 
