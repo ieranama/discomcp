@@ -17,6 +17,8 @@ It connects to a target MCP, collects its declared capabilities and configured d
 
 > **Status:** Experimental. DiscoMCP supports real newline-delimited stdio MCP servers and provider-neutral command reasoning backends. It does not execute mutations, external actions, destructive operations, administrative operations, or arbitrary execution while onboarding a target. MCP protocol serving and HTTP transports remain future work.
 
+No agent should walk onto the dance floor blind — DiscoMCP checks the room, learns the moves, and only then cuts in.
+
 ## Why DiscoMCP
 
 An MCP tool catalogue alone does not explain how a particular user's accessible workspace is organized or which tool sequence solves a real task. DiscoMCP keeps the target catalogue internal, records evidence for every important claim, and generates an operational model that agents can use without guessing.
