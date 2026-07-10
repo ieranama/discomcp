@@ -1,4 +1,15 @@
-# DiscoMCP
+<div align="center">
+
+# 🪩 DiscoMCP
+
+**Turn an unknown MCP into a reusable, workspace-aware operational skill for AI agents.**
+
+[![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release)](https://github.com/ieranama/discomcp/releases)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![🪩 LinkedIn](https://img.shields.io/badge/🪩_LinkedIn-I%C3%B1igo_Era%C3%B1a-0A66C2?logo=linkedin&logoColor=white)](http://linkedin.com/in/inigo-erana/)
+
+</div>
 
 DiscoMCP turns an unknown Model Context Protocol (MCP) connection into a reusable, workspace-aware operational skill for AI agents.
 
@@ -148,9 +159,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). By participating, you agree to follow th
 
 ## License
 
-DiscoMCP is dual-licensed under either of:
+Licensed under either of
 
-- [MIT License](LICENSE-MIT)
 - [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
 
 at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in DiscoMCP by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
