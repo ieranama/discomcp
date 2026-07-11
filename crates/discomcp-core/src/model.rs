@@ -195,6 +195,10 @@ pub struct ToolCard {
     #[serde(default)]
     pub declared_purposes: Vec<String>,
     pub risk: RiskClass,
+    /// Where `risk` came from: `server_annotation`, `agent_declared`, or
+    /// `unclassified`.
+    #[serde(default)]
+    pub risk_evidence: String,
     #[serde(default)]
     pub required_arguments: Vec<String>,
     #[serde(default)]
@@ -527,6 +531,11 @@ pub struct ProbeDecision {
     pub alternatives: Vec<ProbeAlternative>,
     #[serde(default)]
     pub argument_provenance: Vec<ArgumentProvenance>,
+    /// The agent's own risk classification of the selected tool. DiscoMCP never
+    /// infers risk from text; without a read-class declaration (or a server
+    /// readOnlyHint) the probe is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_risk: Option<RiskClass>,
     #[serde(default)]
     pub stop: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -563,6 +572,10 @@ pub struct ProbeRecord {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpretation: Option<EvidenceClaim>,
+    /// Agent-attributed evidence for the risk class the agent declared on this
+    /// probe. `None` when the probe carried no declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_classification: Option<EvidenceClaim>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

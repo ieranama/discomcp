@@ -49,6 +49,7 @@ fn plan(context: &Value) -> ReasoningResponse {
             confidence: 0.9,
             alternatives: Vec::new(),
             argument_provenance: Vec::new(),
+            declared_risk: None,
             stop: false,
             stop_reason: None,
         }
@@ -63,6 +64,7 @@ fn plan(context: &Value) -> ReasoningResponse {
             confidence: 0.9,
             alternatives: Vec::new(),
             argument_provenance: Vec::new(),
+            declared_risk: None,
             stop: true,
             stop_reason: Some("The real stdio fixture was profiled safely.".to_string()),
         }

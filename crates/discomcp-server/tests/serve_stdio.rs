@@ -154,14 +154,21 @@ fn serve_stdio_drives_a_full_profiling_session() {
         .as_array()
         .expect("tool_cards array");
     assert!(!cards.is_empty());
+    // Cards are raw material for the agent's own classification: annotations
+    // and a backstop advisory, never a Rust-guessed risk.
+    for card in cards {
+        assert!(card.get("risk").is_none(), "risk must not ride the wire");
+        assert!(card.get("annotations").is_some());
+        assert!(card["backstop_blocked"].is_boolean());
+    }
 
-    // 6. a safe read probe is accepted and returns a redacted observation.
+    // 6. an agent-declared read probe is accepted and returns a redacted observation.
     let probe = recv_after(
         &mut stdin,
         &mut reader,
         call(
             "execute_probe",
-            json!({"target": "mock", "tool": "list_collections", "arguments": {}, "provenance": []}),
+            json!({"target": "mock", "tool": "list_collections", "arguments": {}, "classification": "safe_read", "provenance": []}),
             6,
         ),
     );
@@ -171,7 +178,7 @@ fn serve_stdio_drives_a_full_profiling_session() {
     assert!(observed["observation"]["shape"].is_object());
     assert!(observed["observation"].get("sample").is_some());
 
-    // 7. a mutating probe is rejected by the safety runtime.
+    // 7. an undeclared mutating probe is rejected by the safety runtime.
     let mutating = recv_after(
         &mut stdin,
         &mut reader,
@@ -194,18 +201,42 @@ fn serve_stdio_drives_a_full_profiling_session() {
         .to_ascii_lowercase()
         .contains("risk"));
 
-    // 8. finalize writes the artifact set to disk.
+    // 8. a destructive-named tool is backstopped even when the agent falsely
+    // declares it a read.
+    let backstopped = recv_after(
+        &mut stdin,
+        &mut reader,
+        call(
+            "execute_probe",
+            json!({
+                "target": "mock",
+                "tool": "delete_item",
+                "arguments": {"collection_id": "projects", "item_id": "x"},
+                "classification": "safe_read",
+                "provenance": []
+            }),
+            8,
+        ),
+    );
+    let vetoed = &backstopped["result"]["structuredContent"];
+    assert_eq!(vetoed["outcome"], "rejected");
+    assert!(vetoed["reason"]
+        .as_str()
+        .expect("reason string")
+        .contains("backstop"));
+
+    // 9. finalize writes the artifact set to disk.
     let finalized = recv_after(
         &mut stdin,
         &mut reader,
-        call("finalize_profile", json!({"target": "mock"}), 8),
+        call("finalize_profile", json!({"target": "mock"}), 9),
     );
     let output_dir = finalized["result"]["structuredContent"]["output_dir"]
         .as_str()
         .expect("output_dir string");
     assert!(std::path::Path::new(output_dir).join("SKILL.md").exists());
 
-    // 9. closing stdin lets the server reach EOF and exit cleanly.
+    // 10. closing stdin lets the server reach EOF and exit cleanly.
     drop(stdin);
     let status = child.wait().expect("await child exit");
     assert!(status.success(), "server should exit cleanly on stdin EOF");

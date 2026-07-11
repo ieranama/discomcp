@@ -761,8 +761,9 @@ fn initial_uncertainties(
         .any(|tool| tool.card.risk == RiskClass::Unknown)
     {
         uncertainties.push(Uncertainty {
-            question: "What are the side effects of tools classified as unknown?".to_string(),
-            reason: "The declared metadata did not support a fail-safe classification.".to_string(),
+            question: "What are the side effects of the unclassified tools?".to_string(),
+            reason: "Neither a server annotation nor an agent declaration classified them during profiling."
+                .to_string(),
             importance: "high".to_string(),
             evidence: catalogue
                 .tools
@@ -771,7 +772,10 @@ fn initial_uncertainties(
                 .map(|tool| EvidenceRef {
                     status: EvidenceStatus::Unknown,
                     source: format!("tool:{}", tool.raw.name),
-                    detail: Some("Insufficient declared safety evidence".to_string()),
+                    detail: Some(format!(
+                        "the agent did not classify `{}` during profiling",
+                        tool.raw.name
+                    )),
                 })
                 .collect(),
         });
@@ -1158,6 +1162,7 @@ mod tests {
                         json_pointer: "/items/0/id".to_string(),
                     },
                 }],
+                declared_risk: None,
                 stop: false,
                 stop_reason: None,
             },
@@ -1170,6 +1175,7 @@ mod tests {
             result_fingerprint: None,
             error: None,
             interpretation: None,
+            declared_classification: None,
         };
         let workspace = infer_workspace_model(
             "gws",

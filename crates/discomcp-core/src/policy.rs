@@ -40,215 +40,77 @@ pub struct SafetyPolicy {
 
 impl SafetyPolicy {
     #[must_use]
-    pub fn classify_tool(&self, tool: &crate::model::RawTool) -> RiskClass {
-        classify_tool(tool)
-    }
-
-    #[must_use]
     pub fn permits(&self, risk: &RiskClass) -> bool {
         risk.is_allowed_during_onboarding()
             || (*risk == RiskClass::SensitiveRead && self.allow_sensitive_reads)
     }
 }
 
+const DESTRUCTIVE_VERBS: &[&str] = &[
+    "delete", "drop", "purge", "wipe", "destroy", "remove", "truncate",
+];
+
+/// Deterministic hard gate. `Some(reason)` => never auto-execute during
+/// onboarding, regardless of what the agent declared.
 #[must_use]
-pub fn classify_tool(tool: &crate::model::RawTool) -> RiskClass {
-    let annotation = &tool.annotations;
-    if annotation
-        .get("discomcp.risk")
-        .and_then(Value::as_str)
-        .and_then(parse_risk)
-        .is_some()
+pub fn backstop_veto(tool: &crate::model::RawTool) -> Option<String> {
+    if tool
+        .annotations
+        .get("destructiveHint")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
     {
-        // The checked parse cannot fail after `is_some`.
-        return parse_risk(
-            annotation
-                .get("discomcp.risk")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
-        .unwrap_or(RiskClass::Unknown);
+        return Some("server declares destructiveHint=true".to_string());
     }
-    if annotation
+    if let Some(verb) = name_segments(&tool.name)
+        .iter()
+        .find(|segment| DESTRUCTIVE_VERBS.contains(&segment.as_str()))
+    {
+        return Some(format!("tool name contains destructive verb `{verb}`"));
+    }
+    None
+}
+
+/// Risk from server annotations ONLY. Rust never infers risk from text.
+#[must_use]
+pub fn annotation_risk(tool: &crate::model::RawTool) -> RiskClass {
+    if tool
+        .annotations
         .get("destructiveHint")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
         return RiskClass::Destructive;
     }
-
-    let text = format!(
-        "{} {} {} {}",
-        tool.name,
-        tool.description,
-        tool.input_schema,
-        tool.output_schema
-            .as_ref()
-            .map_or_else(String::new, Value::to_string)
-    )
-    .to_ascii_lowercase();
-
-    if contains_any(
-        &text,
-        &[
-            "arbitrary code",
-            "execute code",
-            "run code",
-            "shell command",
-            "command execution",
-            "execute sql",
-            "sql statement",
-        ],
-    ) {
-        return RiskClass::ArbitraryExecution;
-    }
-    if contains_any(
-        &text,
-        &[
-            "permanently delete",
-            "destructive",
-            "delete",
-            "destroy",
-            "purge",
-            "wipe",
-        ],
-    ) {
-        return RiskClass::Destructive;
-    }
-    if contains_any(
-        &text,
-        &[
-            "admin",
-            // A bare "permission" also appears in read-only metadata descriptions
-            // ("returns size, permissions, type"), so require an administrative act.
-            "permission settings",
-            "manage permission",
-            "change permission",
-            "grant permission",
-            "set permission",
-            "revoke permission",
-            "credential",
-            "api key",
-            "access control",
-            "role assignment",
-        ],
-    ) {
-        return RiskClass::Administrative;
-    }
-    if contains_any(
-        &text,
-        &[
-            "send message",
-            "send email",
-            "publish",
-            "webhook",
-            "external side effect",
-            "notify",
-        ],
-    ) {
-        return RiskClass::ExternalSideEffect;
-    }
-    if contains_any(
-        &text,
-        &[
-            "creates", "create ", "updates", "update ", "modifies", "modify ", "writes", "write ",
-            "patch", "rename", "move ", "archive",
-        ],
-    ) {
-        return RiskClass::Mutation;
-    }
-    if contains_any(
-        &text,
-        &[
-            "calculate",
-            "calculation",
-            "transform",
-            "convert",
-            "parse payload",
-            "pure computation",
-        ],
-    ) && contains_any(
-        &text,
-        &["harmless", "deterministic", "no side effect", "read-only"],
-    ) {
-        return RiskClass::PureComputation;
-    }
-
-    // Real-world MCP tools rarely declare readOnlyHint; a read-verb segment at
-    // the start (list_datasets, get_table_info) or end (calendar_events_list,
-    // gmail_users_getProfile) is the de-facto convention.
-    let name = tool.name.to_ascii_lowercase();
-    // Case is load-bearing in the last segment: `getProfile` is a read verb,
-    // `getaway` / `listen` / `viewer` are not.
-    let last_segment = tool.name.rsplit(['_', '-']).next().unwrap_or_default();
-    let read_verb_name = ["list", "get", "read", "describe", "fetch", "show", "view"]
-        .iter()
-        .any(|verb| {
-            name == *verb
-                || name.starts_with(&format!("{verb}_"))
-                || name.starts_with(&format!("{verb}-"))
-                || last_segment.eq_ignore_ascii_case(verb)
-                || last_segment.strip_prefix(*verb).is_some_and(|rest| {
-                    rest.starts_with(|character: char| character.is_ascii_uppercase())
-                })
-        });
-    let read_only_declared = annotation
+    if tool
+        .annotations
         .get("readOnlyHint")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || read_verb_name
-        || contains_any(
-            &text,
-            &[
-                "read-only",
-                "read only",
-                "does not modify",
-                "retrieves",
-                "returns",
-                "lists",
-            ],
-        );
-    if !read_only_declared {
-        return RiskClass::Unknown;
-    }
-    if contains_any(
-        &text,
-        &[
-            "private",
-            "sensitive",
-            "message content",
-            "personal data",
-            "email address",
-        ],
-    ) {
-        return RiskClass::SensitiveRead;
-    }
-    if has_sampling_property(&tool.input_schema)
-        || contains_any(&text, &["bounded", "filter", "query", "search"])
     {
-        return RiskClass::ConstrainedRead;
+        return RiskClass::SafeRead;
     }
-    RiskClass::SafeRead
+    RiskClass::Unknown
 }
 
-fn parse_risk(value: &str) -> Option<RiskClass> {
-    match value {
-        "safe_read" => Some(RiskClass::SafeRead),
-        "constrained_read" => Some(RiskClass::ConstrainedRead),
-        "sensitive_read" => Some(RiskClass::SensitiveRead),
-        "pure_computation" => Some(RiskClass::PureComputation),
-        "mutation" => Some(RiskClass::Mutation),
-        "external_side_effect" => Some(RiskClass::ExternalSideEffect),
-        "destructive" => Some(RiskClass::Destructive),
-        "administrative" => Some(RiskClass::Administrative),
-        "arbitrary_execution" => Some(RiskClass::ArbitraryExecution),
-        "unknown" => Some(RiskClass::Unknown),
-        _ => None,
+/// Split on `_`/`-`, then split camelCase humps; lowercase each segment.
+/// Word-boundary aware so `deleteEvent` is vetoed but `undelete_item` is not.
+fn name_segments(name: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    for part in name.split(['_', '-']) {
+        let mut current = String::new();
+        for character in part.chars() {
+            if character.is_ascii_uppercase() && !current.is_empty() {
+                segments.push(current.to_ascii_lowercase());
+                current = String::new();
+            }
+            current.push(character);
+        }
+        if !current.is_empty() {
+            segments.push(current.to_ascii_lowercase());
+        }
     }
-}
-
-fn contains_any(text: &str, patterns: &[&str]) -> bool {
-    patterns.iter().any(|pattern| text.contains(pattern))
+    segments
 }
 
 pub fn validate_json_schema(schema: &Value, value: &Value) -> Result<(), String> {
@@ -399,10 +261,25 @@ pub async fn execute_safe_probe(request: SafeProbeRequest<'_>) -> ProbeExecution
             "selected tool does not exist in the cached catalogue",
         );
     };
-    let risk = tool.card.risk.clone();
-    if !policy.permits(&risk) {
-        return rejected(risk, "risk policy forbids this tool during onboarding");
+    let declared = decision.declared_risk.clone().unwrap_or_default(); // Unknown
+                                                                       // The veto runs BEFORE the readOnlyHint allow: a server lying with both
+                                                                       // readOnlyHint=true and a destructive name/hint is still blocked.
+    if let Some(reason) = backstop_veto(&tool.raw) {
+        return rejected(declared, &format!("backstop: {reason}"));
     }
+    let read_only_hint = tool
+        .raw
+        .annotations
+        .get("readOnlyHint")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !read_only_hint && !policy.permits(&declared) {
+        return rejected(
+            declared,
+            "declare this probe's risk as safe_read, constrained_read, or pure_computation (field `classification`); tools without readOnlyHint run only when you declare them read-class",
+        );
+    }
+    let risk = declared;
     if budget.probes_executed >= budgets.max_mcp_probes {
         return rejected(risk, "MCP probe budget is exhausted");
     }
@@ -415,7 +292,7 @@ pub async fn execute_safe_probe(request: SafeProbeRequest<'_>) -> ProbeExecution
     if let Err(reason) = validate_identifier_provenance(tool, decision, observations) {
         return rejected(risk, &reason);
     }
-    if let Err(reason) = validate_sampling_limits(tool, &decision.arguments, budgets) {
+    if let Err(reason) = validate_sampling_limits(tool, &risk, &decision.arguments, budgets) {
         return rejected(risk, &reason);
     }
     if dry_run {
@@ -579,6 +456,7 @@ fn validate_identifier_provenance(
 
 fn validate_sampling_limits(
     tool: &CataloguedTool,
+    risk: &RiskClass,
     arguments: &Value,
     budgets: &ExplorationBudgets,
 ) -> Result<(), String> {
@@ -598,10 +476,8 @@ fn validate_sampling_limits(
             }
         }
     }
-    let is_bounded_reader = matches!(
-        tool.card.risk,
-        RiskClass::ConstrainedRead | RiskClass::SensitiveRead
-    ) && has_sampling_property(&tool.raw.input_schema);
+    let is_bounded_reader = matches!(risk, RiskClass::ConstrainedRead | RiskClass::SensitiveRead)
+        && has_sampling_property(&tool.raw.input_schema);
     if is_bounded_reader
         && !sampling_keys()
             .iter()
@@ -659,19 +535,24 @@ mod tests {
         }
     }
 
+    /// A probe with an agent-declared read classification, the normal case.
     fn decision(name: &str, arguments: serde_json::Value) -> ProbeDecision {
+        declared_decision(name, arguments, Some(RiskClass::SafeRead))
+    }
+
+    fn declared_decision(
+        name: &str,
+        arguments: serde_json::Value,
+        declared_risk: Option<RiskClass>,
+    ) -> ProbeDecision {
         ProbeDecision {
             objective: "test probe".to_string(),
             unresolved_question: "test".to_string(),
             selected_tool: Some(name.to_string()),
             arguments,
-            expected_information: String::new(),
-            expected_information_gain: 1.0,
             confidence: 1.0,
-            alternatives: Vec::new(),
-            argument_provenance: Vec::new(),
-            stop: false,
-            stop_reason: None,
+            declared_risk,
+            ..ProbeDecision::default()
         }
     }
 
@@ -740,13 +621,8 @@ mod tests {
             unresolved_question: "id".to_string(),
             selected_tool: Some("get_value".to_string()),
             arguments: json!({"value_id": "invented"}),
-            expected_information: String::new(),
-            expected_information_gain: 1.0,
             confidence: 1.0,
-            alternatives: Vec::new(),
-            argument_provenance: Vec::new(),
-            stop: false,
-            stop_reason: None,
+            ..ProbeDecision::default()
         };
         let mut budget = RuntimeBudget::default();
         let budgets = ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick);
@@ -803,10 +679,7 @@ mod tests {
             unresolved_question: "id".to_string(),
             selected_tool: Some("get_value".to_string()),
             arguments: json!({"value_id": "value-1"}),
-            expected_information: String::new(),
-            expected_information_gain: 1.0,
             confidence: 1.0,
-            alternatives: Vec::new(),
             argument_provenance: vec![ArgumentProvenance {
                 json_pointer: "/value_id".to_string(),
                 source: ArgumentSource::Observed {
@@ -814,8 +687,7 @@ mod tests {
                     json_pointer: "/values/0/value_id".to_string(),
                 },
             }],
-            stop: false,
-            stop_reason: None,
+            ..ProbeDecision::default()
         };
         let mut budget = RuntimeBudget::default();
         let budgets = ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick);
@@ -839,50 +711,207 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_disallowed_risk_class_is_blocked_before_execution() {
-        let cases = [
-            ("create", "Creates a persistent item.", RiskClass::Mutation),
-            (
-                "send",
-                "Send message to an external recipient.",
-                RiskClass::ExternalSideEffect,
-            ),
-            (
-                "delete",
-                "Permanently delete an item.",
-                RiskClass::Destructive,
-            ),
-            (
-                "roles",
-                "Change role permission settings.",
-                RiskClass::Administrative,
-            ),
-            (
-                "code",
-                "Execute arbitrary code from an input.",
-                RiskClass::ArbitraryExecution,
-            ),
-            (
+    async fn every_disallowed_declared_risk_class_is_blocked_before_execution() {
+        let disallowed = [
+            RiskClass::Mutation,
+            RiskClass::ExternalSideEffect,
+            RiskClass::Destructive,
+            RiskClass::Administrative,
+            RiskClass::ArbitraryExecution,
+            RiskClass::Unknown,
+        ];
+        for declared in disallowed {
+            let raw_tool = tool(
                 "mystery",
                 "Processes an opaque payload.",
-                RiskClass::Unknown,
-            ),
-        ];
-        for (name, description, expected_risk) in cases {
-            let raw_tool = tool(name, description, json!({"type": "object"}));
+                json!({"type": "object"}),
+            );
             let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
-            assert_eq!(catalogue.tools[0].card.risk, expected_risk);
             let client = client_for(raw_tool, json!({"called": true}));
             let result = execute(
                 &client,
                 &catalogue,
-                &decision(name, json!({})),
+                &declared_decision("mystery", json!({}), Some(declared)),
                 &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
             )
             .await;
             assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
             assert!(client.calls().lock().expect("lock").is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn backstop_blocks_destructive_hint_regardless_of_declaration() {
+        // Even a lying readOnlyHint=true alongside destructiveHint stays blocked.
+        let raw_tool = RawTool {
+            name: "sync_state".to_string(),
+            description: "Synchronizes state.".to_string(),
+            input_schema: json!({"type": "object"}),
+            output_schema: None,
+            annotations: json!({"destructiveHint": true, "readOnlyHint": true}),
+        };
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"called": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &decision("sync_state", json!({})),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+        assert!(result.runtime_decision.reason.contains("destructiveHint"));
+        assert!(client.calls().lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn backstop_blocks_destructive_verb_names_on_word_boundaries() {
+        let vetoed = [
+            "delete_event",
+            "events_delete",
+            "deleteEvent",
+            "batchDelete",
+            "drop_table",
+            "purge-cache",
+            "truncate_logs",
+        ];
+        for name in vetoed {
+            assert!(
+                backstop_veto(&tool(name, "", json!({}))).is_some(),
+                "{name} must be vetoed"
+            );
+        }
+        let allowed = [
+            "removalist_search",
+            "dropdown_list",
+            "undelete_item",
+            "calendar_events_list",
+        ];
+        for name in allowed {
+            assert!(
+                backstop_veto(&tool(name, "", json!({}))).is_none(),
+                "{name} must not be vetoed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn undeclared_tool_without_readonly_hint_is_rejected_with_instruction() {
+        let raw_tool = tool("status", "", json!({"type": "object"}));
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"ok": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &declared_decision("status", json!({}), None),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+        assert!(result.runtime_decision.reason.contains("classification"));
+        assert!(client.calls().lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn readonly_hint_runs_without_a_declaration() {
+        let raw_tool = RawTool {
+            name: "status".to_string(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+            output_schema: None,
+            annotations: json!({"readOnlyHint": true}),
+        };
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"ok": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &declared_decision("status", json!({}), None),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Accepted);
+        assert_eq!(result.risk, RiskClass::Unknown);
+    }
+
+    #[tokio::test]
+    async fn declared_sensitive_read_is_gated_by_the_policy_flag() {
+        let raw_tool = tool("inbox", "", json!({"type": "object"}));
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let probe = declared_decision("inbox", json!({}), Some(RiskClass::SensitiveRead));
+        let budgets = ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick);
+        let client = client_for(raw_tool.clone(), json!({"ok": true}));
+        let result = execute(&client, &catalogue, &probe, &budgets).await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+
+        let client = client_for(raw_tool, json!({"ok": true}));
+        let mut budget = RuntimeBudget::default();
+        let policy = SafetyPolicy {
+            allow_sensitive_reads: true,
+        };
+        let candidates = ["inbox".to_string()];
+        let result = execute_safe_probe(SafeProbeRequest {
+            client: &client,
+            catalogue: &catalogue,
+            decision: &probe,
+            candidate_tools: &candidates,
+            observations: &[],
+            budgets: &budgets,
+            budget: &mut budget,
+            policy: &policy,
+            dry_run: false,
+        })
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn terse_tool_with_declared_read_class_is_probeable() {
+        // The class of tool the old keyword heuristic mishandled: terse name,
+        // empty description, no annotations. The agent's judgement makes it run.
+        let raw_tool = tool("calendar_events_list", "", json!({"type": "object"}));
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"items": []}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &declared_decision(
+                "calendar_events_list",
+                json!({}),
+                Some(RiskClass::ConstrainedRead),
+            ),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Accepted);
+        assert_eq!(result.risk, RiskClass::ConstrainedRead);
+    }
+
+    #[tokio::test]
+    async fn sampling_requirement_keys_off_the_declared_class() {
+        // A declared constrained read over a schema with a sampling property must
+        // pass an explicit sampling argument.
+        let raw_tool = tool(
+            "list_values",
+            "",
+            json!({
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1}},
+                "additionalProperties": false
+            }),
+        );
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"called": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &declared_decision("list_values", json!({}), Some(RiskClass::ConstrainedRead)),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+        assert!(result.runtime_decision.reason.contains("sampling"));
+        assert!(client.calls().lock().expect("lock").is_empty());
     }
 
     #[tokio::test]
@@ -1027,62 +1056,6 @@ mod tests {
         })
         .await;
         assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Failed);
-    }
-
-    #[test]
-    fn terse_real_world_tools_classify_by_name_prefix() {
-        let schema = json!({"type": "object"});
-        // Google genai-toolbox style: terse descriptions, no annotations.
-        let cases = [
-            ("list_dataset_ids", "Use this tool to list datasets."),
-            ("get_table_info", "Use this tool to get table metadata."),
-            ("describe_collection", "Field metadata for one collection."),
-            // Google-API style: the verb is the last name segment.
-            ("calendar_events_list", "Calendar events."),
-            ("gmail_users_getProfile", "Current user's Gmail profile."),
-        ];
-        for (name, description) in cases {
-            let risk = classify_tool(&tool(name, description, schema.clone()));
-            assert!(
-                matches!(risk, RiskClass::SafeRead | RiskClass::ConstrainedRead),
-                "{name} classified as {risk:?}"
-            );
-        }
-        assert_eq!(
-            classify_tool(&tool(
-                "execute_sql",
-                "Use this tool to execute sql statement.",
-                schema.clone(),
-            )),
-            RiskClass::ArbitraryExecution
-        );
-        // Dangerous keywords still win over a read-verb name prefix.
-        assert_eq!(
-            classify_tool(&tool(
-                "get_credentials",
-                "Returns the stored credential for a user.",
-                schema.clone(),
-            )),
-            RiskClass::Administrative
-        );
-        // ...but merely *returning* permissions is a read, not an administrative act.
-        assert_eq!(
-            classify_tool(&tool(
-                "get_file_info",
-                "Retrieve detailed metadata about a file or directory. Returns size, \
-                 creation time, last modified time, permissions, and type.",
-                schema.clone(),
-            )),
-            RiskClass::SafeRead
-        );
-        // A read verb is a whole segment, not any prefix of one.
-        for name in ["getaway", "listen", "viewer"] {
-            assert_eq!(
-                classify_tool(&tool(name, "Processes an opaque payload.", schema.clone())),
-                RiskClass::Unknown,
-                "{name} must not be read-classified by a prefix match"
-            );
-        }
     }
 
     #[tokio::test]

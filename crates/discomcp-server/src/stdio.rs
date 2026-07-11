@@ -11,7 +11,8 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use discomcp_core::artifacts::regenerate_skill;
-use discomcp_core::model::{ArgumentProvenance, ProbeDecision};
+use discomcp_core::model::{ArgumentProvenance, ProbeDecision, RiskClass};
+use discomcp_core::policy::backstop_veto;
 use discomcp_core::{DiscoMcp, ProfileOptions, ProfilingSession, Result};
 use serde_json::{json, Value};
 use tokio::runtime::Handle;
@@ -22,15 +23,20 @@ const INSTRUCTIONS: &str = "DiscoMCP is a safety runtime for profiling an unknow
 you are the reasoning brain. Run profiling in a BACKGROUND SUBAGENT so the user's foreground work \
 is never blocked. Workflow: (1) list_targets to see configured targets; (2) lookup_target — if it \
 returns no existing_skill_dir (a MISS), dispatch a non-blocking background subagent to build the \
-skill and continue the user's task meanwhile; (3) inspect_target to connect, classify each tool's \
-risk, and start a session (returns tool_cards); (4) execute_probe in a loop, each result carries a \
-`gaps` report (unsampled_structures, unexecuted_safe_reads, untraversed_identifiers, sampling_hints, \
-depth_signal) — let the gaps drive the next probe: traverse an untraversed_identifier with its cited \
-provenance, run an unexecuted_safe_read, or use a sampling_hint param (orderBy/pageSize/q/filter) to \
-sample most-recent instead of blind first-N; call session_status anytime for the same report without \
-spending a probe. DiscoMCP enforces risk class, JSON-schema validation, identifier provenance, \
-sampling limits, and the probe budget, returning a redacted observation or a rejection reason to \
-learn from. STOP when the gaps are sufficiently closed (unexecuted_safe_reads and \
+skill and continue the user's task meanwhile; (3) inspect_target to connect and start a session — \
+returns tool_cards (name, description, input_schema, raw annotations, backstop_blocked). YOU \
+classify each tool's risk from its card; DiscoMCP does not guess. (4) execute_probe in a loop, \
+declaring your `classification` on every probe (only safe_read/constrained_read/pure_computation \
+run; readOnlyHint-annotated tools also run). Each result carries a `gaps` report \
+(unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal) — \
+let the gaps drive the next probe: traverse an untraversed_identifier with its cited provenance, \
+run an unexecuted_tool you judge read-safe, or use a sampling_hint param (orderBy/pageSize/q/filter) \
+to sample most-recent instead of blind first-N; call session_status anytime for the same report \
+without spending a probe. DiscoMCP enforces only a deterministic backstop (server destructiveHint, \
+destructive-verb tool names, never executing a tool you did not explicitly submit) plus JSON-schema \
+validation, identifier provenance, sampling limits, response-size caps, secret redaction, and the \
+probe budget. Risk judgement is yours; your declarations are recorded as agent-attributed evidence \
+in the profile. STOP when the gaps are sufficiently closed (unexecuted_tools and \
 untraversed_identifiers near empty, or depth_signal.probes_executed approaching probe_budget) — \
 DiscoMCP reports, you decide; the only hard stop is the \"MCP probe budget is exhausted\" rejection. \
 (5) finalize_profile to synthesize and write the workspace model, operational model and SKILL.md, \
@@ -159,8 +165,9 @@ fn handle_inspect(
             json!({
                 "name": tool.raw.name,
                 "description": tool.raw.description,
-                "risk": tool.card.risk,
                 "input_schema": tool.raw.input_schema,
+                "annotations": tool.raw.annotations,           // readOnlyHint/destructiveHint raw
+                "backstop_blocked": backstop_veto(&tool.raw).is_some(), // advisory only
             })
         })
         .collect::<Vec<_>>();
@@ -216,13 +223,10 @@ fn handle_execute_probe(
         arguments: probe_arguments,
         argument_provenance,
         objective: string_arg(arguments, "objective").unwrap_or_default(),
-        unresolved_question: String::new(),
-        expected_information: String::new(),
-        expected_information_gain: 0.0,
+        declared_risk: string_arg(arguments, "classification")
+            .and_then(|value| serde_json::from_value::<RiskClass>(json!(value)).ok()),
         confidence: 1.0,
-        alternatives: Vec::new(),
-        stop: false,
-        stop_reason: None,
+        ..ProbeDecision::default()
     };
     let outcome = handle.block_on(session.execute_probe(decision));
     // Rejected/Failed are valid, expected outcomes the agent must learn from,
@@ -321,7 +325,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "inspect_target",
-            "description": "Connect to the target MCP, list its declared tools/resources/prompts, classify each tool's risk, and start a profiling session. Returns tool cards (name, description, risk, input schema) for planning safe probes.",
+            "description": "Connect to the target MCP, list its declared tools/resources/prompts, and start a profiling session. Returns tool cards (name, description, input schema, raw server annotations, backstop_blocked advisory) as raw material — YOU classify each tool's risk; DiscoMCP never keyword-guesses.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],
@@ -333,14 +337,17 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "execute_probe",
-            "description": "Validate and, if safe, execute ONE tool call against the target. DiscoMCP enforces risk class (only safe reads run), JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation they came from), sampling limits, and the probe budget. Returns a redacted observation (shape, sample, identifiers, enum values) on acceptance, or the reason it was rejected. Every result also includes a `gaps` report (unsampled_structures, unexecuted_safe_reads, untraversed_identifiers, sampling_hints, depth_signal) to drive the next probe; call session_status for it without spending a probe.",
+            "description": "Validate and, if permitted, execute ONE tool call against the target. You must declare your risk `classification` for the tool; only read classes run. DiscoMCP hard-blocks only tools the server marks destructiveHint or whose name contains a destructive verb (delete/drop/purge/wipe/destroy/remove/truncate), and enforces JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation), sampling limits, and the probe budget. Returns a redacted observation or the rejection reason. Every result includes a `gaps` report (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal).",
             "inputSchema": {
                 "type": "object",
-                "required": ["target", "tool", "arguments"],
+                "required": ["target", "tool", "arguments", "classification"],
                 "properties": {
                     "target": {"type": "string"},
                     "tool": {"type": "string", "description": "A tool name from inspect_target's tool_cards."},
                     "arguments": {"type": "object", "description": "Arguments for the target tool call."},
+                    "classification": {"type": "string",
+                        "enum": ["safe_read","constrained_read","sensitive_read","pure_computation","mutation","external_side_effect","destructive","administrative","arbitrary_execution"],
+                        "description": "YOUR risk classification of this tool, judged from its name, description, input_schema and annotations. Only safe_read/constrained_read/pure_computation execute (readOnlyHint-annotated tools also execute). Recorded as agent-attributed evidence in the profile."},
                     "provenance": {
                         "type": "array",
                         "description": "Origin of each argument. REQUIRED for any identifier argument (id, *_id, *-id, *Id, *_uri, contains 'identifier'). Use kind \"observed\" citing the probe the identifier came from. Use \"user_defined\" ONLY for an identifier the human user explicitly supplied — never for values you invented; it is recorded as user-attributed evidence.",
@@ -386,7 +393,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "session_status",
-            "description": "Return the current GAP REPORT for an active session, computed only from state already gathered — no target calls, no probe consumed. Reports (does not decide): unsampled_structures (collections listed but never drilled into), unexecuted_safe_reads (safe tools not yet run, with why_useful), untraversed_identifiers (ids seen in output but never used as a get-by-id argument, with likely_consumer_tools), sampling_hints (schema params like orderBy/pageSize/q/filter on unused tools for smart sampling), and depth_signal (raw coverage counts + probe budget). The same report rides every execute_probe result under `gaps`. You decide when coverage is enough.",
+            "description": "Return the current GAP REPORT for an active session, computed only from state already gathered — no target calls, no probe consumed. Reports (does not decide): unsampled_structures (collections listed but never drilled into), unexecuted_tools (unprobed tools minus backstop-blocked; you judge which are read-safe, with why_useful), untraversed_identifiers (ids seen in output but never used as a get-by-id argument, with likely_consumer_tools), sampling_hints (schema params like orderBy/pageSize/q/filter on unused tools for smart sampling), and depth_signal (raw coverage counts + probe budget). The same report rides every execute_probe result under `gaps`. You decide when coverage is enough.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],
@@ -505,7 +512,7 @@ mod tests {
             json!({"target": "mock-collection", "tool": "list_collections", "arguments": {}}),
         );
         let gaps = probe["result"]["structuredContent"]["gaps"].clone();
-        assert!(!gaps["unexecuted_safe_reads"]
+        assert!(!gaps["unexecuted_tools"]
             .as_array()
             .expect("unexecuted array")
             .is_empty());
@@ -525,7 +532,7 @@ mod tests {
         assert_eq!(status["result"]["isError"], false);
         assert_eq!(status["result"]["structuredContent"], gaps);
 
-        let unexecuted_before = gaps["unexecuted_safe_reads"].as_array().unwrap().len();
+        let unexecuted_before = gaps["unexecuted_tools"].as_array().unwrap().len();
         let traversed_before = gaps["depth_signal"]["identifiers_traversed"]
             .as_u64()
             .unwrap();
@@ -538,6 +545,7 @@ mod tests {
                 "target": "mock-collection",
                 "tool": "describe_collection",
                 "arguments": {"collection_id": "projects"},
+                "classification": "safe_read",
                 "provenance": [{
                     "json_pointer": "/collection_id",
                     "source": {
@@ -554,7 +562,7 @@ mod tests {
             "the traversal probe must be accepted"
         );
         // Running a new safe read shrinks the unexecuted set...
-        assert!(after["unexecuted_safe_reads"].as_array().unwrap().len() < unexecuted_before);
+        assert!(after["unexecuted_tools"].as_array().unwrap().len() < unexecuted_before);
         // ...and traversing an identifier is recorded (the shrinking proof).
         assert_eq!(
             after["depth_signal"]["identifiers_traversed"]

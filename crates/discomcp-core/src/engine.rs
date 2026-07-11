@@ -25,7 +25,9 @@ use crate::model::{
     Uncertainty,
 };
 use crate::normalization::normalize_observation;
-use crate::policy::{execute_safe_probe, RuntimeBudget, SafeProbeRequest, SafetyPolicy};
+use crate::policy::{
+    backstop_veto, execute_safe_probe, RuntimeBudget, SafeProbeRequest, SafetyPolicy,
+};
 use crate::reasoning::{
     CommandReasoningBackend, ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningRole,
     ReasoningTask, ScriptedMockReasoningBackend,
@@ -95,6 +97,15 @@ async fn run_probe(
         result_fingerprint: None,
         error: None,
         interpretation: None,
+        declared_classification: decision.declared_risk.as_ref().map(|risk| {
+            EvidenceClaim::declared(
+                format!(
+                    "agent classified `{tool}` as {risk:?}",
+                    tool = decision.selected_tool.as_deref().unwrap_or_default()
+                ),
+                "agent:execute_probe",
+            )
+        }),
     };
     let Some(response) = execution.response else {
         if record.runtime_decision.outcome != RuntimeOutcome::Skipped {
@@ -435,6 +446,7 @@ impl DiscoMcp {
                     result_fingerprint: None,
                     error: None,
                     interpretation: None,
+                    declared_classification: None,
                 });
                 break;
             }
@@ -663,7 +675,7 @@ pub struct ProbeOutcome {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct GapReport {
     pub unsampled_structures: Vec<UnsampledStructure>,
-    pub unexecuted_safe_reads: Vec<UnexecutedSafeRead>,
+    pub unexecuted_tools: Vec<UnexecutedTool>,
     pub untraversed_identifiers: Vec<UntraversedIdentifier>,
     pub sampling_hints: Vec<SamplingHint>,
     pub depth_signal: DepthSignal,
@@ -684,12 +696,11 @@ pub struct UnsampledStructure {
     pub downstream_samples: usize,
 }
 
-/// A safe-read tool that has not been run yet.
+/// An unprobed tool the backstop does not block. The agent judges which of
+/// these are read-safe to declare and probe.
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct UnexecutedSafeRead {
+pub struct UnexecutedTool {
     pub tool: String,
-    /// One of `SafeRead | ConstrainedRead | PureComputation`.
-    pub risk: RiskClass,
     /// First sentence of the tool's declared description, trimmed to ~140 chars.
     pub why_useful: String,
 }
@@ -720,8 +731,8 @@ pub struct SamplingHint {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DepthSignal {
     pub structures_observed: usize,
-    pub safe_reads_covered: usize,
-    pub safe_reads_total: usize,
+    pub probeable_tools_covered: usize,
+    pub probeable_tools_total: usize,
     pub identifiers_traversed: usize,
     pub identifiers_observed: usize,
     /// `runtime_budget.probes_executed`.
@@ -810,7 +821,33 @@ impl ProfilingSession {
 
     /// Deterministically assembles and writes the full artifact set from the
     /// session's accumulated safe observations. No reasoning backend is used.
-    pub fn finalize(self) -> Result<ProfileResult> {
+    pub fn finalize(mut self) -> Result<ProfileResult> {
+        // Fold the agent's per-probe risk declarations into the catalogue so
+        // every downstream consumer of `card.risk` sees annotation-or-agent
+        // sourced classes. Last declaration wins; a destructive server
+        // annotation outranks any declaration.
+        for record in &self.probe_log {
+            if record.declared_classification.is_none() {
+                continue;
+            }
+            let Some(tool_name) = record.decision.selected_tool.as_deref() else {
+                continue;
+            };
+            if let Some(tool) = self
+                .catalogue
+                .tools
+                .iter_mut()
+                .find(|tool| tool.raw.name == tool_name)
+            {
+                if tool.card.risk == RiskClass::Destructive
+                    && tool.card.risk_evidence == "server_annotation"
+                {
+                    continue;
+                }
+                tool.card.risk = record.risk.clone();
+                tool.card.risk_evidence = "agent_declared".to_string();
+            }
+        }
         let profile = assemble_profile(
             &self.target_id,
             self.discovery,
@@ -883,22 +920,23 @@ fn compute_gaps(
         })
         .collect();
 
-    // Safe reads not yet run.
-    let unexecuted_safe_reads: Vec<UnexecutedSafeRead> = catalogue
+    // Unprobed tools minus backstop-blocked: everything the agent could still
+    // judge read-safe and probe. The backstop is the only hard rejection left,
+    // so the report never steers into one.
+    let unexecuted_tools: Vec<UnexecutedTool> = catalogue
         .tools
         .iter()
-        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| backstop_veto(&tool.raw).is_none())
         .filter(|tool| !executed.contains(&tool.raw.name))
-        .map(|tool| UnexecutedSafeRead {
+        .map(|tool| UnexecutedTool {
             tool: tool.raw.name.clone(),
-            risk: tool.card.risk.clone(),
             why_useful: first_sentence(&tool.raw.description),
         })
         .collect();
-    let safe_reads_total = catalogue
+    let probeable_tools_total = catalogue
         .tools
         .iter()
-        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| backstop_veto(&tool.raw).is_none())
         .count();
 
     // Identifiers observed but never used as a get-by-id argument.
@@ -967,7 +1005,7 @@ fn compute_gaps(
     let sampling_hints: Vec<SamplingHint> = catalogue
         .tools
         .iter()
-        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| backstop_veto(&tool.raw).is_none())
         .filter(|tool| !executed.contains(&tool.raw.name))
         .filter_map(|tool| {
             let params: Vec<String> = schema_property_keys(&tool.raw.input_schema)
@@ -985,16 +1023,16 @@ fn compute_gaps(
         })
         .collect();
 
-    let safe_reads_covered = safe_reads_total - unexecuted_safe_reads.len();
+    let probeable_tools_covered = probeable_tools_total - unexecuted_tools.len();
     GapReport {
         unsampled_structures,
-        unexecuted_safe_reads,
+        unexecuted_tools,
         untraversed_identifiers,
         sampling_hints,
         depth_signal: DepthSignal {
             structures_observed,
-            safe_reads_covered,
-            safe_reads_total,
+            probeable_tools_covered,
+            probeable_tools_total,
             identifiers_traversed,
             identifiers_observed,
             probes_executed,
@@ -1024,13 +1062,38 @@ fn first_sentence(description: &str) -> String {
     }
 }
 
-/// Property keys declared in a tool's `input_schema.properties`.
+/// Every property name declared anywhere in a tool's `input_schema`, at any
+/// depth. A JSON Schema is a tree, and MCP servers nest real parameters to any
+/// depth — some wrap the whole API surface in a generic `params` object, others
+/// keep it flat. Walking the tree keeps the hint heuristics working regardless
+/// of a server's schema shape instead of assuming a flat top level.
 fn schema_property_keys(input_schema: &Value) -> Vec<String> {
-    input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|properties| properties.keys().cloned().collect())
-        .unwrap_or_default()
+    let mut keys = Vec::new();
+    collect_schema_property_keys(input_schema, &mut keys);
+    keys
+}
+
+fn collect_schema_property_keys(schema: &Value, out: &mut Vec<String>) {
+    let Value::Object(map) = schema else { return };
+    if let Some(properties) = map.get("properties").and_then(Value::as_object) {
+        for (name, subschema) in properties {
+            out.push(name.clone());
+            collect_schema_property_keys(subschema, out);
+        }
+    }
+    // Descend through the structural keywords that carry nested subschemas.
+    for keyword in ["items", "additionalProperties"] {
+        if let Some(subschema) = map.get(keyword) {
+            collect_schema_property_keys(subschema, out);
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = map.get(keyword).and_then(Value::as_array) {
+            for branch in branches {
+                collect_schema_property_keys(branch, out);
+            }
+        }
+    }
 }
 
 /// Case- and separator-insensitive normalization: lowercase, drop `_`/`-`.
@@ -1041,18 +1104,18 @@ fn normalize_param(name: &str) -> String {
         .collect()
 }
 
-/// Heuristic: onboarding-allowed tools whose schema (or, as a fallback, declared
+/// Heuristic: backstop-clear tools whose schema (or, as a fallback, declared
 /// arguments) expose a param matching an observed identifier name — a normalized
-/// exact match, or a shared non-empty `*id` stem. Restricted to tools DiscoMCP
-/// permits during onboarding so the hint never steers a probe into a rejection.
-/// Reported as a hint, never a guarantee.
+/// exact match, or a shared non-empty `*id` stem. Restricted to tools the
+/// backstop does not block so the hint never steers a probe into the one hard
+/// rejection left. Reported as a hint, never a guarantee.
 fn tools_matching_param(catalogue: &ToolCatalogue, identifier_name: &str) -> Vec<String> {
     let target = normalize_param(identifier_name);
     let target_stem = target.strip_suffix("id").filter(|stem| !stem.is_empty());
     catalogue
         .tools
         .iter()
-        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| backstop_veto(&tool.raw).is_none())
         .filter(|tool| {
             let mut params = schema_property_keys(&tool.raw.input_schema);
             if params.is_empty() {
@@ -1661,6 +1724,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_declared_read_is_recorded_and_written_back_at_finalize() {
+        let output = session_output("declared");
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session(
+                "mock-collection",
+                ProfileOptions {
+                    output_dir: Some(output.clone()),
+                    ..ProfileOptions::default()
+                },
+            )
+            .await
+            .expect("session should start");
+        let mut probe = session_probe("list_collections", json!({}));
+        probe.declared_risk = Some(RiskClass::ConstrainedRead);
+        let outcome = session.execute_probe(probe).await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Accepted);
+        assert_eq!(outcome.risk, RiskClass::ConstrainedRead);
+        let claim = session
+            .probe_log
+            .last()
+            .and_then(|record| record.declared_classification.as_ref())
+            .expect("declared classification must be recorded as evidence");
+        assert_eq!(claim.status, EvidenceStatus::Declared);
+        assert!(claim
+            .source_references
+            .contains(&"agent:execute_probe".to_string()));
+
+        let result = session.finalize().expect("finalize should write artifacts");
+        let card = result
+            .profile
+            .catalogue
+            .tools
+            .iter()
+            .find(|tool| tool.raw.name == "list_collections")
+            .map(|tool| &tool.card)
+            .expect("card");
+        assert_eq!(card.risk, RiskClass::ConstrainedRead);
+        assert_eq!(card.risk_evidence, "agent_declared");
+        let skill = fs::read_to_string(output.join("SKILL.md")).expect("read SKILL.md");
+        assert!(skill.contains("- `list_collections`: `agent_declared`"));
+        // Unprobed tools without annotations land in the Unclassified bucket.
+        assert!(skill.contains("### Unclassified"));
+        assert!(skill.contains("- `create_item`: `unclassified`"));
+        let _ = fs::remove_dir_all(output);
+    }
+
+    #[tokio::test]
     async fn session_rejects_a_mutation_without_incrementing_budget() {
         let app = session_app(MockMcpClient::collection_fixture());
         let mut session = app
@@ -1920,6 +2031,7 @@ mod tests {
             confidence: 0.9,
             alternatives: Vec::new(),
             argument_provenance: Vec::new(),
+            declared_risk: None,
             stop,
             stop_reason: stop.then_some("A later safe probe succeeded.".to_string()),
         };
@@ -2007,39 +2119,22 @@ mod tests {
             },
             card: ToolCard {
                 name: name.to_string(),
-                risk: RiskClass::SafeRead,
                 ..ToolCard::default()
             },
         }
     }
 
-    fn mutation_tool(name: &str) -> CataloguedTool {
-        CataloguedTool {
-            raw: RawTool {
+    /// A tool the deterministic backstop vetoes (destructive verb in the name).
+    fn backstop_blocked_tool(name: &str, schema: Value) -> CataloguedTool {
+        assert!(
+            crate::policy::backstop_veto(&RawTool {
                 name: name.to_string(),
                 ..RawTool::default()
-            },
-            card: ToolCard {
-                name: name.to_string(),
-                risk: RiskClass::Mutation,
-                ..ToolCard::default()
-            },
-        }
-    }
-
-    fn mutation_tool_with_schema(name: &str, schema: Value) -> CataloguedTool {
-        CataloguedTool {
-            raw: RawTool {
-                name: name.to_string(),
-                input_schema: schema,
-                ..RawTool::default()
-            },
-            card: ToolCard {
-                name: name.to_string(),
-                risk: RiskClass::Mutation,
-                ..ToolCard::default()
-            },
-        }
+            })
+            .is_some(),
+            "fixture `{name}` must be backstop-blocked"
+        );
+        safe_tool(name, "", schema)
     }
 
     fn gap_catalogue(tools: Vec<CataloguedTool>) -> ToolCatalogue {
@@ -2105,17 +2200,17 @@ mod tests {
     }
 
     #[test]
-    fn gaps_unexecuted_safe_reads_excludes_executed_and_mutation() {
+    fn gaps_unexecuted_tools_excludes_executed_and_backstop_blocked() {
         let cat = gap_catalogue(vec![
             safe_tool("A", "First tool. More text.", json!({})),
             safe_tool("B", "Bee does things. Ignore this.", json!({})),
-            mutation_tool("M"),
+            backstop_blocked_tool("delete_m", json!({})),
         ]);
         let probes = vec![accepted_probe("A", vec![])];
         let gaps = compute_gaps(&cat, &[], &probes, 10, 1);
-        assert_eq!(gaps.unexecuted_safe_reads.len(), 1);
-        assert_eq!(gaps.unexecuted_safe_reads[0].tool, "B");
-        assert_eq!(gaps.unexecuted_safe_reads[0].why_useful, "Bee does things.");
+        assert_eq!(gaps.unexecuted_tools.len(), 1);
+        assert_eq!(gaps.unexecuted_tools[0].tool, "B");
+        assert_eq!(gaps.unexecuted_tools[0].why_useful, "Bee does things.");
     }
 
     #[test]
@@ -2123,10 +2218,10 @@ mod tests {
         let schema = json!({"type":"object","properties":{"document_id":{"type":"string"}}});
         let cat = gap_catalogue(vec![
             safe_tool("get_doc", "Gets a doc.", schema.clone()),
-            // A mutation consuming the same param must never be offered as a
-            // likely consumer — following that hint would hit an execute_probe
-            // rejection.
-            mutation_tool_with_schema("delete_doc", schema),
+            // A backstop-blocked tool consuming the same param must never be
+            // offered as a likely consumer — following that hint would hit an
+            // execute_probe rejection.
+            backstop_blocked_tool("delete_doc", schema),
         ]);
         let observations = vec![obs(
             "obs-1",
@@ -2176,9 +2271,10 @@ mod tests {
         let schema = json!({"type":"object","properties":{"orderBy":{},"pageSize":{},"name":{}}});
         let cat = gap_catalogue(vec![
             safe_tool("list_x", "Lists.", schema.clone()),
-            // A mutation exposing a sampling param must never be offered as a
-            // sampling hint — probing it would hit an execute_probe rejection.
-            mutation_tool_with_schema("delete_all", schema),
+            // A backstop-blocked tool exposing a sampling param must never be
+            // offered as a sampling hint — probing it would hit an
+            // execute_probe rejection.
+            backstop_blocked_tool("delete_all", schema),
         ]);
         let gaps = compute_gaps(&cat, &[], &[], 10, 0);
         assert_eq!(gaps.sampling_hints.len(), 1);
@@ -2201,7 +2297,7 @@ mod tests {
                 "g",
                 json!({"type":"object","properties":{"thing_id":{}}}),
             ),
-            mutation_tool("M"),
+            backstop_blocked_tool("delete_m", json!({})),
         ]);
         let observations = vec![obs(
             "obs-1",
@@ -2217,8 +2313,8 @@ mod tests {
             vec![observed_prov("obs-1", "/thing_id")],
         )];
         let ds = compute_gaps(&cat, &observations, &probes, 8, 1).depth_signal;
-        assert_eq!(ds.safe_reads_total, 2);
-        assert_eq!(ds.safe_reads_covered, 1);
+        assert_eq!(ds.probeable_tools_total, 2);
+        assert_eq!(ds.probeable_tools_covered, 1);
         assert_eq!(ds.identifiers_observed, 2);
         assert_eq!(ds.identifiers_traversed, 1);
         assert_eq!(ds.structures_observed, 0);
@@ -2242,7 +2338,7 @@ mod tests {
         };
         let cat = gap_catalogue(vec![safe_tool("A", "a", json!({}))]);
         let gaps = compute_gaps(&cat, &[], &[stop], 10, 0);
-        assert_eq!(gaps.unexecuted_safe_reads.len(), 1);
+        assert_eq!(gaps.unexecuted_tools.len(), 1);
     }
 
     #[test]
@@ -2267,8 +2363,8 @@ mod tests {
             vec![observed_prov("obs-1", "/document_id")],
         ));
         let g2 = compute_gaps(&cat, &observations, &p2, 10, 2);
-        assert!(g0.unexecuted_safe_reads.len() >= g1.unexecuted_safe_reads.len());
-        assert!(g1.unexecuted_safe_reads.len() >= g2.unexecuted_safe_reads.len());
+        assert!(g0.unexecuted_tools.len() >= g1.unexecuted_tools.len());
+        assert!(g1.unexecuted_tools.len() >= g2.unexecuted_tools.len());
         assert!(g0.untraversed_identifiers.len() >= g1.untraversed_identifiers.len());
         assert!(g1.untraversed_identifiers.len() >= g2.untraversed_identifiers.len());
     }

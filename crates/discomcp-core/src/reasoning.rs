@@ -304,6 +304,7 @@ impl ScriptedMockReasoningBackend {
                         confidence: 0.95,
                         alternatives: Vec::new(),
                         argument_provenance: Vec::new(),
+                        declared_risk: None,
                         stop: true,
                         stop_reason: Some("Initial structures and a safe identifier traversal were observed.".to_string()),
                     })
@@ -381,6 +382,7 @@ fn plan_response(
                 confidence: 0.92,
                 alternatives: Vec::new(),
                 argument_provenance,
+                declared_risk: None,
                 stop: false,
                 stop_reason: None,
             })

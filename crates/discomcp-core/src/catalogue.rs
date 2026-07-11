@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::model::{
     CataloguedTool, RawPrompt, RawResource, RawTool, RiskClass, ToolCard, ToolCatalogue,
 };
-use crate::policy::classify_tool;
+use crate::policy::annotation_risk;
 
 #[must_use]
 pub fn build_catalogue(
@@ -78,12 +78,18 @@ pub fn tool_card(tool: &RawTool) -> ToolCard {
             .as_ref()
             .map_or_else(String::new, serde_json::Value::to_string)
     );
-    let risk = classify_tool(tool);
+    let risk = annotation_risk(tool);
+    let risk_evidence = if risk == RiskClass::Unknown {
+        "unclassified"
+    } else {
+        "server_annotation"
+    };
     ToolCard {
         name: tool.name.clone(),
         summary: first_sentence(&tool.description),
         declared_purposes: declared_purposes(tool, &risk),
         risk,
+        risk_evidence: risk_evidence.to_string(),
         required_arguments: required.into_iter().collect(),
         optional_arguments,
         identifier_dependencies,

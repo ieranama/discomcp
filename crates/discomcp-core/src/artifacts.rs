@@ -173,9 +173,10 @@ fn render_tool_map(profile: &TargetProfile) -> String {
     let mut output = String::from("# Tool Map\n\n");
     for tool in &profile.catalogue.tools {
         output.push_str(&format!(
-            "## `{}`\n\n- Risk: `{}`\n- Evidence: `declared`\n- Summary: {}\n",
+            "## `{}`\n\n- Risk: `{}`\n- Evidence: `{}`\n- Summary: {}\n",
             tool.raw.name,
             risk_label(&tool.card.risk),
+            risk_evidence_label(&tool.card),
             tool.card.summary
         ));
         if !tool.card.required_arguments.is_empty() {
@@ -405,6 +406,7 @@ fn render_skill(profile: &TargetProfile) -> String {
             "Destructive Or Administrative Tools",
             vec!["destructive", "administrative", "arbitrary_execution"],
         ),
+        ("Unclassified", vec!["unknown"]),
     ] {
         output.push_str(&format!("### {heading}\n\n"));
         let tools = profile
@@ -418,8 +420,15 @@ fn render_skill(profile: &TargetProfile) -> String {
         } else {
             for tool in tools {
                 output.push_str(&format!(
-                    "- `{}`: `declared`; {}\n",
-                    tool.raw.name, tool.card.summary
+                    "- `{}`: `{}`; {}{}\n",
+                    tool.raw.name,
+                    risk_evidence_label(&tool.card),
+                    tool.card.summary,
+                    if heading == "Unclassified" {
+                        " — not probed or classified during profiling"
+                    } else {
+                        ""
+                    }
                 ));
             }
             output.push('\n');
@@ -501,7 +510,7 @@ fn render_skill(profile: &TargetProfile) -> String {
          misses (the catalogue fingerprint below no longer matches the live target) or this profile \
          is stale, re-profile in a BACKGROUND subagent so the user is not blocked: run `discomcp serve`, \
          then inspect_target -> execute_probe in a loop driven by each result's `gaps` report \
-         (or session_status) -> stop when unexecuted_safe_reads and untraversed_identifiers are near \
+         (or session_status) -> stop when unexecuted_tools and untraversed_identifiers are near \
          empty or the probe budget is reached -> finalize_profile, and report the new SKILL.md path. \
          Never run mutation/side-effect/destructive/admin tools during a refresh.\n\n",
     );
@@ -629,6 +638,15 @@ fn evidence_label(status: &EvidenceStatus) -> &'static str {
         EvidenceStatus::UserDefined => "user_defined",
         EvidenceStatus::Unknown => "unknown",
         EvidenceStatus::Contradicted => "contradicted",
+    }
+}
+
+/// Falls back for catalogues persisted before `risk_evidence` existed.
+fn risk_evidence_label(card: &crate::model::ToolCard) -> &str {
+    if card.risk_evidence.is_empty() {
+        "unclassified"
+    } else {
+        &card.risk_evidence
     }
 }
 

@@ -16,8 +16,8 @@ pub mod redaction;
 
 pub use config::DiscoMcpConfig;
 pub use engine::{
-    DepthSignal, DiscoMcp, GapReport, ProbeOutcome, ProfilingSession, SamplingHint,
-    UnexecutedSafeRead, UnsampledStructure, UntraversedIdentifier,
+    DepthSignal, DiscoMcp, GapReport, ProbeOutcome, ProfilingSession, SamplingHint, UnexecutedTool,
+    UnsampledStructure, UntraversedIdentifier,
 };
 pub use error::{DiscoMcpError, Result};
 pub use model::{ProfileOptions, ProfileResult};
