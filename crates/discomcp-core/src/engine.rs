@@ -12,15 +12,16 @@ use tracing::{debug, info, warn};
 use crate::artifacts::write_profile_artifacts;
 use crate::catalogue::{build_catalogue, fingerprint, retrieve_tool_cards};
 use crate::config::{DiscoMcpConfig, ReasoningConfig, ResolvedTargetConfig, TransportKind};
+use crate::envelope::unwrap_mcp_envelope;
 use crate::error::{DiscoMcpError, Result};
 use crate::inference::{infer_capability_profile, infer_workspace_model, operational_model};
 use crate::mcp::stdio::StdioMcpClient;
-use crate::mcp::{McpClient, MockMcpClient};
+use crate::mcp::{McpClient, McpError, MockMcpClient};
 use crate::model::{
     DocumentationIndex, DocumentationSource, EvidenceClaim, EvidenceRef, EvidenceStatus,
     ExplorationBudgets, NormalizedObservation, ProbeDecision, ProbeRecord, ProfileMetadata,
-    ProfileOptions, ProfileResult, QualityDimension, QualityReport, RawDiscovery, RuntimeDecision,
-    RuntimeOutcome, TargetProfile, ToolCard, Uncertainty,
+    ProfileOptions, ProfileResult, QualityDimension, QualityReport, RawDiscovery, RiskClass,
+    RuntimeDecision, RuntimeOutcome, TargetProfile, ToolCard, ToolCatalogue, Uncertainty,
 };
 use crate::normalization::normalize_observation;
 use crate::policy::{execute_safe_probe, RuntimeBudget, SafeProbeRequest, SafetyPolicy};
@@ -33,6 +34,93 @@ use crate::redaction::Redactor;
 #[async_trait]
 pub trait McpClientFactory: Send + Sync {
     async fn connect(&self, target: &ResolvedTargetConfig) -> Result<Box<dyn McpClient>>;
+}
+
+/// Everything one probe needs from its caller. The single probe engine shared by
+/// the embedded reasoning loop ([`DiscoMcp::profile`]) and the agent-driven
+/// session ([`ProfilingSession::execute_probe`]) — they differ only in who picks
+/// the decision and what they do with the result.
+struct ProbeContext<'a> {
+    target_id: &'a str,
+    probe_id: String,
+    client: &'a dyn McpClient,
+    catalogue: &'a ToolCatalogue,
+    candidate_tools: Vec<String>,
+    observations: &'a [NormalizedObservation],
+    budgets: &'a ExplorationBudgets,
+    budget: &'a mut RuntimeBudget,
+    policy: &'a SafetyPolicy,
+    redactor: &'a Redactor,
+    dry_run: bool,
+}
+
+/// Validates a probe against the full safety runtime, executes it when allowed,
+/// and turns any response into a redacted, normalized observation.
+async fn run_probe(
+    context: ProbeContext<'_>,
+    decision: &ProbeDecision,
+) -> (ProbeRecord, Option<NormalizedObservation>) {
+    let ProbeContext {
+        target_id,
+        probe_id,
+        client,
+        catalogue,
+        candidate_tools,
+        observations,
+        budgets,
+        budget,
+        policy,
+        redactor,
+        dry_run,
+    } = context;
+    let execution = execute_safe_probe(SafeProbeRequest {
+        client,
+        catalogue,
+        decision,
+        candidate_tools: &candidate_tools,
+        observations,
+        budgets,
+        budget,
+        policy,
+        dry_run,
+    })
+    .await;
+    let mut record = ProbeRecord {
+        id: probe_id.clone(),
+        decision: decision.clone(),
+        candidate_tools,
+        risk: execution.risk,
+        runtime_decision: execution.runtime_decision.clone(),
+        result_fingerprint: None,
+        error: None,
+        interpretation: None,
+    };
+    let Some(response) = execution.response else {
+        if record.runtime_decision.outcome != RuntimeOutcome::Skipped {
+            record.error = Some(record.runtime_decision.reason.clone());
+        }
+        return (record, None);
+    };
+    // Unwrap before redacting: inside the envelope the payload is one opaque
+    // string, so the redactor would never see its keys or values.
+    let payload = unwrap_mcp_envelope(&response);
+    let (redacted, report) = redactor.redact(&payload);
+    debug!(
+        target = target_id,
+        probe = probe_id,
+        secrets_redacted = report.secrets_redacted,
+        pii_redacted = report.pii_redacted,
+        "normalizing safe target observation"
+    );
+    let observation = normalize_observation(
+        probe_id,
+        decision.selected_tool.clone().unwrap_or_default(),
+        decision.arguments.clone(),
+        &redacted,
+        budgets,
+    );
+    record.result_fingerprint = Some(observation.fingerprint.clone());
+    (record, Some(observation))
 }
 
 pub trait ReasoningBackendFactory: Send + Sync {
@@ -349,45 +437,24 @@ impl DiscoMcp {
                 });
                 break;
             }
-            let execution = execute_safe_probe(SafeProbeRequest {
-                client: client.as_ref(),
-                catalogue: &catalogue,
-                decision: &decision,
-                candidate_tools: &candidate_names,
-                observations: &observations,
-                budgets: &budgets,
-                budget: &mut runtime_budget,
-                policy: &policy,
-                dry_run: options.dry_run,
-            })
+            let (mut record, observation) = run_probe(
+                ProbeContext {
+                    target_id,
+                    probe_id: probe_id.clone(),
+                    client: client.as_ref(),
+                    catalogue: &catalogue,
+                    candidate_tools: candidate_names,
+                    observations: &observations,
+                    budgets: &budgets,
+                    budget: &mut runtime_budget,
+                    policy: &policy,
+                    redactor: &redactor,
+                    dry_run: options.dry_run,
+                },
+                &decision,
+            )
             .await;
-            let mut record = ProbeRecord {
-                id: probe_id.clone(),
-                decision: decision.clone(),
-                candidate_tools: candidate_names,
-                risk: execution.risk,
-                runtime_decision: execution.runtime_decision.clone(),
-                result_fingerprint: None,
-                error: None,
-                interpretation: None,
-            };
-            if let Some(response) = execution.response {
-                let (redacted, report) = redactor.redact(&response);
-                debug!(
-                    target = target_id,
-                    probe = probe_id,
-                    secrets_redacted = report.secrets_redacted,
-                    pii_redacted = report.pii_redacted,
-                    "normalizing safe target observation"
-                );
-                let observation = normalize_observation(
-                    probe_id.clone(),
-                    decision.selected_tool.clone().unwrap_or_default(),
-                    decision.arguments.clone(),
-                    &redacted,
-                    &budgets,
-                );
-                record.result_fingerprint = Some(observation.fingerprint.clone());
+            if let Some(observation) = observation {
                 record.interpretation = Some(interpret_observation(
                     &*reasoning,
                     target_id,
@@ -406,8 +473,7 @@ impl DiscoMcp {
                 }));
                 open_question = next_information_gap(&observation, &decision);
                 observations.push(observation);
-            } else if record.runtime_decision.outcome != RuntimeOutcome::Skipped {
-                record.error = Some(record.runtime_decision.reason.clone());
+            } else if record.error.is_some() {
                 dynamic_uncertainties.push(Uncertainty {
                     question: decision.unresolved_question.clone(),
                     reason: record.runtime_decision.reason.clone(),
@@ -429,42 +495,16 @@ impl DiscoMcp {
             }
         }
 
-        let capability_profile = infer_capability_profile(&catalogue);
-        let mut workspace_model =
-            infer_workspace_model(target_id, &catalogue, &observations, &probe_log);
-        workspace_model.uncertainties.extend(dynamic_uncertainties);
-        for record in &probe_log {
-            if let Some(interpretation) = &record.interpretation {
-                workspace_model.hypotheses.push(crate::model::Hypothesis {
-                    claim: interpretation.clone(),
-                    unresolved_question: record.decision.unresolved_question.clone(),
-                });
-            }
-        }
-        let operational_model =
-            operational_model(target_id, capability_profile.clone(), &workspace_model);
-        let metadata = ProfileMetadata {
-            target_id: target_id.to_string(),
-            profile_version: env!("CARGO_PKG_VERSION").to_string(),
-            generated_at_unix_seconds: now_unix_seconds(),
-            target_fingerprint: catalogue.fingerprint.clone(),
-            mode: options.mode.clone(),
-            goal: options.goal.clone(),
-            static_discovery_complete: true,
-        };
-        let quality_report = quality_report(&catalogue, &workspace_model);
-        let profile = TargetProfile {
-            metadata,
-            raw_discovery: discovery,
+        let profile = assemble_profile(
+            target_id,
+            discovery,
             documentation,
             catalogue,
-            capability_profile,
-            workspace_model,
-            operational_model,
-            probe_log,
             observations,
-            quality_report,
-        };
+            probe_log,
+            dynamic_uncertainties,
+            &options,
+        );
         write_profile_artifacts(&profile, &output_dir)?;
         info!(
             target = target_id,
@@ -524,6 +564,236 @@ impl DiscoMcp {
             existing_skill_dir,
         })
     }
+
+    /// Connects to a target, performs static discovery, and builds the catalogue
+    /// and documentation index for an interactive profiling session.
+    ///
+    /// This path deliberately never constructs a reasoning backend: an external
+    /// agent brain drives probe selection through [`ProfilingSession::execute_probe`].
+    pub async fn start_session(
+        &self,
+        target_id: &str,
+        options: ProfileOptions,
+    ) -> Result<ProfilingSession> {
+        let target = self.config.resolve_target(target_id)?;
+        let output_dir = options
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| self.config.profile_dir.join(target_id));
+        let mut client = self.client_factory.connect(&target).await?;
+        let discovery = static_discovery(client.as_mut()).await?;
+        let catalogue = build_catalogue(
+            discovery.tools.clone(),
+            discovery.resources.clone(),
+            discovery.prompts.clone(),
+        );
+        let documentation = collect_documentation(&target, &discovery, &options);
+        let budgets = options.effective_budgets();
+        let redactor = Redactor::new(options.privacy_mode.clone());
+        let open_question = options.goal.clone().unwrap_or_else(|| {
+            "Discover accessible workspace structures, stable identifiers, and safe workflows."
+                .to_string()
+        });
+        info!(
+            target = target_id,
+            tools = catalogue.tools.len(),
+            "profiling session started"
+        );
+        Ok(ProfilingSession {
+            target_id: target_id.to_string(),
+            output_dir,
+            client,
+            discovery,
+            catalogue,
+            documentation,
+            options,
+            budgets,
+            policy: SafetyPolicy::default(),
+            redactor,
+            runtime_budget: RuntimeBudget::default(),
+            observations: Vec::new(),
+            probe_log: Vec::new(),
+            open_question,
+        })
+    }
+}
+
+/// An in-memory, single-target profiling session driven by an external agent.
+///
+/// The session owns the connected client and all accumulated safe observations
+/// for the life of a served client connection. It applies the identical safety
+/// runtime as [`DiscoMcp::profile`] but takes each probe decision from an agent
+/// rather than an embedded reasoning backend.
+pub struct ProfilingSession {
+    target_id: String,
+    output_dir: PathBuf,
+    client: Box<dyn McpClient>,
+    discovery: RawDiscovery,
+    catalogue: ToolCatalogue,
+    documentation: DocumentationIndex,
+    options: ProfileOptions,
+    budgets: ExplorationBudgets,
+    policy: SafetyPolicy,
+    redactor: Redactor,
+    runtime_budget: RuntimeBudget,
+    observations: Vec<NormalizedObservation>,
+    probe_log: Vec<ProbeRecord>,
+    open_question: String,
+}
+
+/// The result of validating and, when safe, executing one agent-selected probe.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProbeOutcome {
+    pub outcome: RuntimeOutcome,
+    pub reason: String,
+    pub risk: RiskClass,
+    /// The redacted, normalized observation. `Some` only when `outcome` is
+    /// [`RuntimeOutcome::Accepted`].
+    pub observation: Option<NormalizedObservation>,
+}
+
+impl ProfilingSession {
+    /// The declared catalogue the agent reasons over when planning probes.
+    #[must_use]
+    pub fn catalogue(&self) -> &ToolCatalogue {
+        &self.catalogue
+    }
+
+    /// The declared server name from the static handshake.
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        &self.discovery.handshake.server_name
+    }
+
+    /// The current open question the session is trying to resolve.
+    #[must_use]
+    pub fn open_question(&self) -> &str {
+        &self.open_question
+    }
+
+    /// Validates and, if the full safety runtime permits, executes one probe.
+    ///
+    /// The agent already saw the entire catalogue via [`Self::catalogue`], so the
+    /// candidate subset is the whole catalogue: gating is left to the safety
+    /// checks (risk, schema, provenance, sampling, budget, timeout, size).
+    pub async fn execute_probe(&mut self, decision: ProbeDecision) -> ProbeOutcome {
+        let candidate_names = self
+            .catalogue
+            .tools
+            .iter()
+            .map(|tool| tool.raw.name.clone())
+            .collect::<Vec<_>>();
+        let probe_id = format!("probe-{:03}", self.probe_log.len() + 1);
+        let (record, observation) = run_probe(
+            ProbeContext {
+                target_id: &self.target_id,
+                probe_id,
+                client: self.client.as_ref(),
+                catalogue: &self.catalogue,
+                candidate_tools: candidate_names,
+                observations: &self.observations,
+                budgets: &self.budgets,
+                budget: &mut self.runtime_budget,
+                policy: &self.policy,
+                redactor: &self.redactor,
+                dry_run: self.options.dry_run,
+            },
+            &decision,
+        )
+        .await;
+        let mut outcome = ProbeOutcome {
+            outcome: record.runtime_decision.outcome.clone(),
+            reason: record.runtime_decision.reason.clone(),
+            risk: record.risk.clone(),
+            observation: None,
+        };
+        if let Some(observation) = observation {
+            self.open_question = next_information_gap(&observation, &decision);
+            outcome.observation = Some(observation.clone());
+            self.observations.push(observation);
+        }
+        self.probe_log.push(record);
+        outcome
+    }
+
+    /// Deterministically assembles and writes the full artifact set from the
+    /// session's accumulated safe observations. No reasoning backend is used.
+    pub fn finalize(self) -> Result<ProfileResult> {
+        let profile = assemble_profile(
+            &self.target_id,
+            self.discovery,
+            self.documentation,
+            self.catalogue,
+            self.observations,
+            self.probe_log,
+            Vec::new(),
+            &self.options,
+        );
+        write_profile_artifacts(&profile, &self.output_dir)?;
+        info!(
+            target = self.target_id,
+            output = %self.output_dir.display(),
+            structures = profile.workspace_model.structures.len(),
+            probes = profile.probe_log.len(),
+            "profiling session finalized"
+        );
+        Ok(ProfileResult {
+            profile,
+            output_dir: self.output_dir,
+        })
+    }
+}
+
+/// Deterministically assembles a [`TargetProfile`] from discovery, catalogue and
+/// accumulated observations. Shared by [`DiscoMcp::profile`] and
+/// [`ProfilingSession::finalize`].
+#[allow(clippy::too_many_arguments)]
+fn assemble_profile(
+    target_id: &str,
+    discovery: RawDiscovery,
+    documentation: DocumentationIndex,
+    catalogue: ToolCatalogue,
+    observations: Vec<NormalizedObservation>,
+    probe_log: Vec<ProbeRecord>,
+    extra_uncertainties: Vec<Uncertainty>,
+    options: &ProfileOptions,
+) -> TargetProfile {
+    let capability_profile = infer_capability_profile(&catalogue);
+    let mut workspace_model =
+        infer_workspace_model(target_id, &catalogue, &observations, &probe_log);
+    workspace_model.uncertainties.extend(extra_uncertainties);
+    for record in &probe_log {
+        if let Some(interpretation) = &record.interpretation {
+            workspace_model.hypotheses.push(crate::model::Hypothesis {
+                claim: interpretation.clone(),
+                unresolved_question: record.decision.unresolved_question.clone(),
+            });
+        }
+    }
+    let operational_model =
+        operational_model(target_id, capability_profile.clone(), &workspace_model);
+    let metadata = ProfileMetadata {
+        target_id: target_id.to_string(),
+        profile_version: env!("CARGO_PKG_VERSION").to_string(),
+        generated_at_unix_seconds: now_unix_seconds(),
+        target_fingerprint: catalogue.fingerprint.clone(),
+        mode: options.mode.clone(),
+        goal: options.goal.clone(),
+        static_discovery_complete: true,
+    };
+    let quality_report = quality_report(&catalogue, &workspace_model);
+    TargetProfile {
+        metadata,
+        raw_discovery: discovery,
+        documentation,
+        catalogue,
+        capability_profile,
+        workspace_model,
+        operational_model,
+        probe_log,
+        observations,
+        quality_report,
+    }
 }
 
 /// Scans every profile directory below `profile_dir` for one whose saved
@@ -579,8 +849,18 @@ pub struct LookupResult {
 async fn static_discovery(client: &mut dyn McpClient) -> Result<RawDiscovery> {
     let handshake = client.initialize().await?;
     let tools = client.list_tools().await?;
-    let resources = client.list_resources().await?;
-    let prompts = client.list_prompts().await?;
+    // Many real MCP servers only implement tools; a missing resources/prompts
+    // method means "none declared", not a discovery failure.
+    let resources = match client.list_resources().await {
+        Ok(resources) => resources,
+        Err(McpError::Unsupported(_)) => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let prompts = match client.list_prompts().await {
+        Ok(prompts) => prompts,
+        Err(McpError::Unsupported(_)) => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
     Ok(RawDiscovery {
         handshake,
         tools,
@@ -967,6 +1247,169 @@ mod tests {
             Arc::new(FixtureClientFactory { client }),
             Arc::new(FixtureReasoningFactory { backend }),
         )
+    }
+
+    /// A reasoning factory that panics if used, proving the session path never
+    /// constructs or invokes a reasoning backend.
+    struct PanicReasoningFactory;
+
+    impl ReasoningBackendFactory for PanicReasoningFactory {
+        fn create(&self, _target: &ResolvedTargetConfig) -> Result<Arc<dyn ReasoningBackend>> {
+            panic!("the profiling-session path must never construct a reasoning backend");
+        }
+    }
+
+    fn session_app(client: MockMcpClient) -> DiscoMcp {
+        DiscoMcp::with_dependencies(
+            DiscoMcpConfig::builtin_mock(),
+            Arc::new(FixtureClientFactory { client }),
+            Arc::new(PanicReasoningFactory),
+        )
+    }
+
+    fn session_probe(name: &str, arguments: Value) -> ProbeDecision {
+        ProbeDecision {
+            selected_tool: Some(name.to_string()),
+            arguments,
+            confidence: 1.0,
+            ..ProbeDecision::default()
+        }
+    }
+
+    fn session_output(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "discomcp-session-{tag}-{}-{}",
+            std::process::id(),
+            now_unix_seconds()
+        ))
+    }
+
+    #[tokio::test]
+    async fn start_session_builds_catalogue_without_touching_reasoning() {
+        let app = session_app(MockMcpClient::collection_fixture());
+        let session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        assert!(!session.catalogue().tools.is_empty());
+        assert_eq!(session.server_name(), "generic-collection-fixture");
+    }
+
+    #[tokio::test]
+    async fn session_executes_a_safe_read_probe() {
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let outcome = session
+            .execute_probe(session_probe("list_collections", json!({})))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Accepted);
+        assert!(outcome.observation.is_some());
+        assert_eq!(session.runtime_budget.probes_executed, 1);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_a_mutation_without_incrementing_budget() {
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let outcome = session
+            .execute_probe(session_probe(
+                "create_item",
+                json!({"collection_id": "projects", "fields": {}}),
+            ))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        assert!(outcome.reason.to_ascii_lowercase().contains("risk"));
+        assert!(outcome.observation.is_none());
+        assert_eq!(session.runtime_budget.probes_executed, 0);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_schema_invalid_arguments() {
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let outcome = session
+            .execute_probe(session_probe("list_collections", json!({"unexpected": 1})))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        assert!(outcome.reason.to_ascii_lowercase().contains("schema"));
+    }
+
+    #[tokio::test]
+    async fn session_rejects_an_identifier_without_provenance() {
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let outcome = session
+            .execute_probe(session_probe(
+                "describe_collection",
+                json!({"collection_id": "projects"}),
+            ))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        assert!(outcome.reason.contains("provenance"));
+    }
+
+    #[tokio::test]
+    async fn session_rejects_a_probe_when_the_budget_is_exhausted() {
+        let mut budgets = ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick);
+        budgets.max_mcp_probes = 0;
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session(
+                "mock-collection",
+                ProfileOptions {
+                    budgets: Some(budgets),
+                    ..ProfileOptions::default()
+                },
+            )
+            .await
+            .expect("session should start");
+        let outcome = session
+            .execute_probe(session_probe("list_collections", json!({})))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        assert!(outcome.reason.to_ascii_lowercase().contains("budget"));
+    }
+
+    #[tokio::test]
+    async fn session_finalize_writes_artifacts_and_reflects_the_observation() {
+        let output = session_output("finalize");
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session(
+                "mock-collection",
+                ProfileOptions {
+                    output_dir: Some(output.clone()),
+                    ..ProfileOptions::default()
+                },
+            )
+            .await
+            .expect("session should start");
+        let accepted = session
+            .execute_probe(session_probe("list_collections", json!({})))
+            .await;
+        assert_eq!(accepted.outcome, RuntimeOutcome::Accepted);
+        let result = session.finalize().expect("finalize should write artifacts");
+        assert!(output.join("SKILL.md").exists());
+        assert!(output.join("workspace-model.json").exists());
+        assert!(output.join("operational-model.json").exists());
+        assert!(output.join("AGENTS.md").exists());
+        assert!(output.join("evals.yml").exists());
+        assert_eq!(result.profile.observations.len(), 1);
+        assert_eq!(result.profile.observations[0].tool, "list_collections");
+        assert!(!result.profile.workspace_model.structures.is_empty());
+        let _ = fs::remove_dir_all(output);
     }
 
     #[tokio::test]

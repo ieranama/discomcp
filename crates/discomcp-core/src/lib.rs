@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod catalogue;
 pub mod config;
 pub mod engine;
+pub mod envelope;
 pub mod error;
 pub mod inference;
 pub mod mcp;
@@ -14,6 +15,6 @@ pub mod reasoning;
 pub mod redaction;
 
 pub use config::DiscoMcpConfig;
-pub use engine::DiscoMcp;
+pub use engine::{DiscoMcp, ProbeOutcome, ProfilingSession};
 pub use error::{DiscoMcpError, Result};
 pub use model::{ProfileOptions, ProfileResult};

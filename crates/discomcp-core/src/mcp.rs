@@ -18,6 +18,8 @@ pub enum McpError {
     Transport(String),
     #[error("target MCP protocol error: {0}")]
     Protocol(String),
+    #[error("target MCP does not support `{0}`")]
+    Unsupported(String),
     #[error("target MCP does not expose tool `{0}`")]
     ToolNotFound(String),
     #[error("target MCP tool `{tool}` failed: {message}")]

@@ -1,6 +1,7 @@
 use serde_json::{Map, Value};
 
 use crate::model::PrivacyMode;
+use crate::normalization::is_identifier_name;
 
 #[derive(Clone, Debug, Default)]
 pub struct RedactionReport {
@@ -62,10 +63,23 @@ impl Redactor {
                     .collect(),
             ),
             Value::String(string) => {
+                // A secret is a secret wherever it appears: a signed URL under
+                // `download_uri` is still a credential. This check never yields.
                 if looks_like_secret(string) {
                     report.secrets_redacted += 1;
-                    Value::String("[REDACTED_SECRET]".to_string())
-                } else if self.mode != PrivacyMode::LocalTrusted && looks_like_email(string) {
+                    return Value::String("[REDACTED_SECRET]".to_string());
+                }
+                // A primary key is not free-text PII, and redacting it would make
+                // the record uncitable — no observed identifier, so no traversal
+                // (a Google calendar id literally *is* an email address). Outside
+                // `Strict`, values under identifier keys therefore skip the
+                // email/phone *shape* heuristics. `Strict` chooses privacy over
+                // traversal and redacts them like any other value. Name-based rules
+                // (`access_token`, `email`, ...) still apply under every mode.
+                if self.mode != PrivacyMode::Strict && key.is_some_and(is_identifier_name) {
+                    return Value::String(string.clone());
+                }
+                if self.mode != PrivacyMode::LocalTrusted && looks_like_email(string) {
                     report.pii_redacted += 1;
                     Value::String("[REDACTED_EMAIL]".to_string())
                 } else if self.mode == PrivacyMode::Strict && looks_like_phone(string) {
@@ -185,6 +199,34 @@ mod tests {
         assert_eq!(redacted["access_token"], "[REDACTED_SECRET]");
         assert_eq!(redacted["nested"]["status"], "active");
         assert_eq!(report.secrets_redacted, 1);
+        assert_eq!(report.pii_redacted, 1);
+    }
+
+    #[test]
+    fn identifier_keys_never_exempt_secret_shaped_values() {
+        let input = json!({
+            "id": "cal-1",
+            "download_uri": "https://storage.googleapis.com/b/f.pdf?X-Goog-Signature=4d7e2fA9bC0123456789abcdefABCDEF"
+        });
+        for mode in [
+            PrivacyMode::LocalTrusted,
+            PrivacyMode::Balanced,
+            PrivacyMode::Strict,
+        ] {
+            let (redacted, report) = Redactor::new(mode).redact(&input);
+            assert_eq!(redacted["download_uri"], "[REDACTED_SECRET]");
+            assert_eq!(report.secrets_redacted, 1);
+        }
+    }
+
+    #[test]
+    fn email_shaped_identifier_survives_outside_strict_mode() {
+        let input = json!({"id": "person@example.test"});
+        let (balanced, _) = Redactor::new(PrivacyMode::Balanced).redact(&input);
+        assert_eq!(balanced["id"], "person@example.test");
+        // `strict` is an explicit request for privacy over traversal.
+        let (strict, report) = Redactor::new(PrivacyMode::Strict).redact(&input);
+        assert_eq!(strict["id"], "[REDACTED_EMAIL]");
         assert_eq!(report.pii_redacted, 1);
     }
 }

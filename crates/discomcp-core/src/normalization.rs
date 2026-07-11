@@ -187,13 +187,21 @@ fn should_collect_enum(key: &str, value: &Value) -> bool {
         && matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }
 
-fn is_identifier_name(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value == "id"
-        || value.ends_with("_id")
-        || value.ends_with("-id")
-        || value.contains("identifier")
-        || value.ends_with("_uri")
+pub(crate) fn is_identifier_name(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower == "id"
+        || lower.ends_with("_id")
+        || lower.ends_with("-id")
+        || lower.contains("identifier")
+        || lower.ends_with("_uri")
+        || is_camel_case_id(value)
+}
+
+/// `calendarId`, `eventId` — the camelCase spelling of `*_id`.
+fn is_camel_case_id(value: &str) -> bool {
+    value
+        .strip_suffix("Id")
+        .is_some_and(|prefix| prefix.ends_with(|character: char| character.is_ascii_alphanumeric()))
 }
 
 fn escape_pointer(value: &str) -> String {

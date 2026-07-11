@@ -96,6 +96,8 @@ pub fn classify_tool(tool: &crate::model::RawTool) -> RiskClass {
             "run code",
             "shell command",
             "command execution",
+            "execute sql",
+            "sql statement",
         ],
     ) {
         return RiskClass::ArbitraryExecution;
@@ -117,7 +119,14 @@ pub fn classify_tool(tool: &crate::model::RawTool) -> RiskClass {
         &text,
         &[
             "admin",
-            "permission",
+            // A bare "permission" also appears in read-only metadata descriptions
+            // ("returns size, permissions, type"), so require an administrative act.
+            "permission settings",
+            "manage permission",
+            "change permission",
+            "grant permission",
+            "set permission",
+            "revoke permission",
             "credential",
             "api key",
             "access control",
@@ -165,10 +174,29 @@ pub fn classify_tool(tool: &crate::model::RawTool) -> RiskClass {
         return RiskClass::PureComputation;
     }
 
+    // Real-world MCP tools rarely declare readOnlyHint; a read-verb segment at
+    // the start (list_datasets, get_table_info) or end (calendar_events_list,
+    // gmail_users_getProfile) is the de-facto convention.
+    let name = tool.name.to_ascii_lowercase();
+    // Case is load-bearing in the last segment: `getProfile` is a read verb,
+    // `getaway` / `listen` / `viewer` are not.
+    let last_segment = tool.name.rsplit(['_', '-']).next().unwrap_or_default();
+    let read_verb_name = ["list", "get", "read", "describe", "fetch", "show", "view"]
+        .iter()
+        .any(|verb| {
+            name == *verb
+                || name.starts_with(&format!("{verb}_"))
+                || name.starts_with(&format!("{verb}-"))
+                || last_segment.eq_ignore_ascii_case(verb)
+                || last_segment.strip_prefix(*verb).is_some_and(|rest| {
+                    rest.starts_with(|character: char| character.is_ascii_uppercase())
+                })
+        });
     let read_only_declared = annotation
         .get("readOnlyHint")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+        || read_verb_name
         || contains_any(
             &text,
             &[
@@ -599,13 +627,10 @@ fn has_sampling_property(schema: &Value) -> bool {
         })
 }
 
+/// The provenance rule must cover exactly the keys the normalizer records as
+/// observed identifiers, or an agent could invent one the runtime never checks.
 fn is_identifier_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "id"
-        || key.ends_with("_id")
-        || key.ends_with("-id")
-        || key.contains("identifier")
-        || key.ends_with("_uri")
+    crate::normalization::is_identifier_name(key)
 }
 
 #[cfg(test)]
@@ -1002,5 +1027,84 @@ mod tests {
         })
         .await;
         assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Failed);
+    }
+
+    #[test]
+    fn terse_real_world_tools_classify_by_name_prefix() {
+        let schema = json!({"type": "object"});
+        // Google genai-toolbox style: terse descriptions, no annotations.
+        let cases = [
+            ("list_dataset_ids", "Use this tool to list datasets."),
+            ("get_table_info", "Use this tool to get table metadata."),
+            ("describe_collection", "Field metadata for one collection."),
+            // Google-API style: the verb is the last name segment.
+            ("calendar_events_list", "Calendar events."),
+            ("gmail_users_getProfile", "Current user's Gmail profile."),
+        ];
+        for (name, description) in cases {
+            let risk = classify_tool(&tool(name, description, schema.clone()));
+            assert!(
+                matches!(risk, RiskClass::SafeRead | RiskClass::ConstrainedRead),
+                "{name} classified as {risk:?}"
+            );
+        }
+        assert_eq!(
+            classify_tool(&tool(
+                "execute_sql",
+                "Use this tool to execute sql statement.",
+                schema.clone(),
+            )),
+            RiskClass::ArbitraryExecution
+        );
+        // Dangerous keywords still win over a read-verb name prefix.
+        assert_eq!(
+            classify_tool(&tool(
+                "get_credentials",
+                "Returns the stored credential for a user.",
+                schema.clone(),
+            )),
+            RiskClass::Administrative
+        );
+        // ...but merely *returning* permissions is a read, not an administrative act.
+        assert_eq!(
+            classify_tool(&tool(
+                "get_file_info",
+                "Retrieve detailed metadata about a file or directory. Returns size, \
+                 creation time, last modified time, permissions, and type.",
+                schema.clone(),
+            )),
+            RiskClass::SafeRead
+        );
+        // A read verb is a whole segment, not any prefix of one.
+        for name in ["getaway", "listen", "viewer"] {
+            assert_eq!(
+                classify_tool(&tool(name, "Processes an opaque payload.", schema.clone())),
+                RiskClass::Unknown,
+                "{name} must not be read-classified by a prefix match"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn camel_case_identifier_arguments_require_provenance() {
+        let raw_tool = tool(
+            "calendar_events_list",
+            "Lists calendar events.",
+            json!({
+                "type": "object",
+                "properties": {"calendarId": {"type": "string"}}
+            }),
+        );
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"called": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &decision("calendar_events_list", json!({"calendarId": "invented"})),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+        assert!(client.calls().lock().expect("lock").is_empty());
     }
 }

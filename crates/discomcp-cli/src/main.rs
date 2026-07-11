@@ -70,7 +70,7 @@ enum Command {
         #[arg(long)]
         profile: PathBuf,
     },
-    /// Show the stable public MCP server surface reserved by this vertical slice.
+    /// Run the DiscoMCP MCP server over newline-delimited JSON-RPC on stdio.
     Serve {
         #[arg(long)]
         config: Option<PathBuf>,
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
             output,
         } => refresh(target, config, output).await,
         Command::GenerateSkill { target, profile } => generate_skill(target, profile),
-        Command::Serve { config } => serve(config),
+        Command::Serve { config } => serve(config).await,
     }
 }
 
@@ -264,20 +264,9 @@ fn generate_skill(target: String, profile: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn serve(config_path: Option<PathBuf>) -> Result<()> {
+async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     let config = load_config(config_path)?;
-    let server = discomcp_server::DiscoMcpServer::new(config);
-    let surface = discomcp_server::DiscoMcpServer::tool_surface();
-    println!(
-        "DiscoMCP public MCP surface: {} {}",
-        surface.server_name, surface.version
-    );
-    for tool in surface.tools {
-        println!("- {}: {}", tool.name, tool.description);
-    }
-    let _ = server;
-    println!("Protocol transport is not implemented in this first vertical slice.");
-    Ok(())
+    discomcp_server::serve_stdio(config).await
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<DiscoMcpConfig> {
@@ -365,5 +354,9 @@ fn print_refresh(result: &RefreshResult) {
 
 fn init_tracing() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "discomcp_core=info".to_string());
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Logs must go to stderr so `serve` can own stdout for the JSON-RPC stream.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }

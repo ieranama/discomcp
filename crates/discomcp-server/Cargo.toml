@@ -10,6 +10,8 @@ description = "Public MCP-server surface for DiscoMCP"
 [dependencies]
 discomcp-core = { path = "../discomcp-core" }
 serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

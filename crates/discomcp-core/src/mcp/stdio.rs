@@ -77,14 +77,19 @@ impl StdioMcpClient {
             "method": method,
             "params": params,
         });
-        tokio::time::timeout(self.request_timeout, self.request_inner(id, message))
+        tokio::time::timeout(self.request_timeout, self.request_inner(id, &message))
             .await
             .map_err(|_| McpError::Transport(format!("target MCP request `{method}` timed out")))?
+            .map_err(|error| match error {
+                // JSON-RPC -32601: the server does not implement this method.
+                McpError::Unsupported(_) => McpError::Unsupported(method.to_string()),
+                other => other,
+            })
     }
 
-    async fn request_inner(&self, id: u64, message: Value) -> Result<Value, McpError> {
+    async fn request_inner(&self, id: u64, message: &Value) -> Result<Value, McpError> {
         let _request_guard = self.request_lock.lock().await;
-        self.write_message(&message).await?;
+        self.write_message(message).await?;
         let mut stdout = self.stdout.lock().await;
         loop {
             let mut line = String::new();
@@ -105,6 +110,20 @@ impl StdioMcpClient {
                 continue;
             }
             if let Some(error) = message.get("error") {
+                // -32601 is the spec code, but real servers also report missing
+                // methods with other codes and a recognizable message.
+                let error_message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if error.get("code").and_then(Value::as_i64) == Some(-32601)
+                    || error_message.contains("method not found")
+                    || error_message.contains("method not supported")
+                    || error_message.contains("not implemented")
+                {
+                    return Err(McpError::Unsupported(String::new()));
+                }
                 return Err(McpError::Protocol(json_rpc_error_summary(error)));
             }
             return message.get("result").cloned().ok_or_else(|| {

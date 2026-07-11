@@ -56,7 +56,27 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ieranama/discomcp/relea
 
 (Windows: `powershell -ExecutionPolicy Bypass -c "irm https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.ps1 | iex"`. All platform archives are on the [releases page](https://github.com/ieranama/discomcp/releases).)
 
-You'll also need an MCP server you can already run locally over stdio (any newline-delimited JSON-RPC MCP server works). Copy [examples/config.toml](examples/config.toml), point `[targets.example]` at that server's command and args, then run:
+Point a config at any MCP server you can run locally over stdio — this is the whole file:
+
+```toml
+[targets.example]
+transport = "stdio"
+command = "npx"
+args = ["-y", "example-mcp"]
+
+[profiles]
+privacy_mode = "balanced"
+```
+
+Then add DiscoMCP to your agent as a regular MCP server. Your agent is the brain; the DiscoMCP runtime enforces every safety check:
+
+```bash
+claude mcp add discomcp -- discomcp serve --config ./discomcp.toml
+```
+
+The agent drives profiling through six tools — `list_targets`, `lookup_target`, `inspect_target`, `execute_probe`, `finalize_profile`, `generate_skill` — and the runtime validates every probe (risk class, argument schema, identifier provenance, budgets, redaction) before anything touches the target. Mutating, destructive, and administrative tools are always rejected during onboarding. `lookup_target` tells the agent whether a fresh skill already exists for the target's current catalogue, so exploration only runs when something actually changed.
+
+No agent connected? The standalone CLI does the same job with a configured reasoning backend (see [examples/config.toml](examples/config.toml)):
 
 ```bash
 discomcp profile example \
