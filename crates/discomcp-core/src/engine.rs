@@ -821,7 +821,7 @@ impl ProfilingSession {
 
     /// Deterministically assembles and writes the full artifact set from the
     /// session's accumulated safe observations. No reasoning backend is used.
-    pub fn finalize(mut self) -> Result<ProfileResult> {
+    pub fn finalize(mut self, usage_summary: Option<String>) -> Result<ProfileResult> {
         // Fold the agent's per-probe risk declarations into the catalogue so
         // every downstream consumer of `card.risk` sees annotation-or-agent
         // sourced classes. Last declaration wins; a destructive server
@@ -848,7 +848,7 @@ impl ProfilingSession {
                 tool.card.risk_evidence = "agent_declared".to_string();
             }
         }
-        let profile = assemble_profile(
+        let mut profile = assemble_profile(
             &self.target_id,
             self.discovery,
             self.documentation,
@@ -858,6 +858,7 @@ impl ProfilingSession {
             Vec::new(),
             &self.options,
         );
+        profile.metadata.usage_summary = usage_summary;
         write_profile_artifacts(&profile, &self.output_dir)?;
         info!(
             target = self.target_id,
@@ -1192,6 +1193,7 @@ fn assemble_profile(
         target_fingerprint: catalogue.fingerprint.clone(),
         mode: options.mode.clone(),
         goal: options.goal.clone(),
+        usage_summary: None,
         static_discovery_complete: true,
     };
     let quality_report = quality_report(&catalogue, &workspace_model);
@@ -1752,7 +1754,11 @@ mod tests {
             .source_references
             .contains(&"agent:execute_probe".to_string()));
 
-        let result = session.finalize().expect("finalize should write artifacts");
+        let result = session
+            .finalize(Some(
+                "This user curates a small set of collections and reads items by id.".to_string(),
+            ))
+            .expect("finalize should write artifacts");
         let card = result
             .profile
             .catalogue
@@ -1765,6 +1771,9 @@ mod tests {
         assert_eq!(card.risk_evidence, "agent_declared");
         let skill = fs::read_to_string(output.join("SKILL.md")).expect("read SKILL.md");
         assert!(skill.contains("- `list_collections`: `agent_declared`"));
+        // The agent-authored usage narrative is woven into the skill.
+        assert!(skill.contains("## How You Use This MCP"));
+        assert!(skill.contains("curates a small set of collections"));
         // Unprobed tools without annotations land in the Unclassified bucket.
         assert!(skill.contains("### Unclassified"));
         assert!(skill.contains("- `create_item`: `unclassified`"));
@@ -1861,7 +1870,9 @@ mod tests {
             .execute_probe(session_probe("list_collections", json!({})))
             .await;
         assert_eq!(accepted.outcome, RuntimeOutcome::Accepted);
-        let result = session.finalize().expect("finalize should write artifacts");
+        let result = session
+            .finalize(None)
+            .expect("finalize should write artifacts");
         assert!(output.join("SKILL.md").exists());
         assert!(output.join("workspace-model.json").exists());
         assert!(output.join("operational-model.json").exists());

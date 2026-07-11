@@ -294,6 +294,10 @@ fn render_skill(profile: &TargetProfile) -> String {
         "`declared`: This skill profiles target `{}` and is generated from its cached catalogue plus redacted safe observations.\n\n",
         profile.metadata.target_id
     ));
+    if let Some(usage) = &profile.metadata.usage_summary {
+        output.push_str("## How You Use This MCP\n\n");
+        output.push_str(&format!("`agent_authored`: {usage}\n\n"));
+    }
     output.push_str("## When To Use This MCP\n\n");
     output.push_str("Use it for intents supported by the observed structures and declared tools below. Do not assume unavailable structures, fields, identifiers, or relationships.\n\n");
     output.push_str("## What The MCP Exposes\n\n");

@@ -691,6 +691,11 @@ pub struct ProfileMetadata {
     pub mode: ExplorationMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    /// Agent-authored narrative of how the user actually uses this source,
+    /// woven into SKILL.md. The runtime captures raw observations; the agent
+    /// reasons over them to write this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_summary: Option<String>,
     pub static_discovery_complete: bool,
 }
 

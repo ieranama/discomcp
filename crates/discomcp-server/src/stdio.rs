@@ -241,7 +241,7 @@ fn handle_finalize(arguments: &Value, sessions: &mut HashMap<String, ProfilingSe
     let Some(session) = sessions.remove(&target) else {
         return tool_err("no active session; call inspect_target first");
     };
-    match session.finalize() {
+    match session.finalize(string_arg(arguments, "usage_summary")) {
         Ok(result) => {
             let skill_path = result.output_dir.join("SKILL.md");
             tool_ok(json!({
@@ -375,11 +375,14 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "finalize_profile",
-            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. Deterministic — no reasoning backend needed. Returns skill_path (the written SKILL.md) to report back to the user.",
+            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. Pass `usage_summary`: YOUR narrative of how THIS user actually uses this source, reasoned from what you observed (their saved searches, folders, tracked entities, recurring queries) — not a generic capability list. This becomes the skill's 'How You Use This MCP' section and is the whole point: the skill must let an agent exploit the MCP the way this user does. Returns skill_path to report back to the user.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],
-                "properties": {"target": {"type": "string"}}
+                "properties": {
+                    "target": {"type": "string"},
+                    "usage_summary": {"type": "string", "description": "Agent-authored: how this specific user uses this source, inferred from the observations (concrete: what they track, which tools serve their real workflow, in what order)."}
+                }
             }
         },
         {
