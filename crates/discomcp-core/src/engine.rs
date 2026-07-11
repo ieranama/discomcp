@@ -18,10 +18,11 @@ use crate::inference::{infer_capability_profile, infer_workspace_model, operatio
 use crate::mcp::stdio::StdioMcpClient;
 use crate::mcp::{McpClient, McpError, MockMcpClient};
 use crate::model::{
-    DocumentationIndex, DocumentationSource, EvidenceClaim, EvidenceRef, EvidenceStatus,
-    ExplorationBudgets, NormalizedObservation, ProbeDecision, ProbeRecord, ProfileMetadata,
-    ProfileOptions, ProfileResult, QualityDimension, QualityReport, RawDiscovery, RiskClass,
-    RuntimeDecision, RuntimeOutcome, TargetProfile, ToolCard, ToolCatalogue, Uncertainty,
+    ArgumentSource, DocumentationIndex, DocumentationSource, EvidenceClaim, EvidenceRef,
+    EvidenceStatus, ExplorationBudgets, NormalizedObservation, ProbeDecision, ProbeRecord,
+    ProfileMetadata, ProfileOptions, ProfileResult, QualityDimension, QualityReport, RawDiscovery,
+    RiskClass, RuntimeDecision, RuntimeOutcome, TargetProfile, ToolCard, ToolCatalogue,
+    Uncertainty,
 };
 use crate::normalization::normalize_observation;
 use crate::policy::{execute_safe_probe, RuntimeBudget, SafeProbeRequest, SafetyPolicy};
@@ -650,6 +651,83 @@ pub struct ProbeOutcome {
     /// The redacted, normalized observation. `Some` only when `outcome` is
     /// [`RuntimeOutcome::Accepted`].
     pub observation: Option<NormalizedObservation>,
+    /// A read-only gap report over the whole session, reflecting this probe.
+    pub gaps: GapReport,
+}
+
+/// A read-only exploration gap report computed purely from accumulated session
+/// state. It REPORTS numbers and lists; it never thresholds, gates, or decides.
+///
+/// `Serialize`-only (backward-safe on the wire, same rationale as
+/// [`ProbeOutcome`]) and `Default` so it composes into `ProbeOutcome`.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct GapReport {
+    pub unsampled_structures: Vec<UnsampledStructure>,
+    pub unexecuted_safe_reads: Vec<UnexecutedSafeRead>,
+    pub untraversed_identifiers: Vec<UntraversedIdentifier>,
+    pub sampling_hints: Vec<SamplingHint>,
+    pub depth_signal: DepthSignal,
+}
+
+/// A collection an observation listed but no later probe drilled into.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct UnsampledStructure {
+    /// Observation that listed the collection.
+    pub observation_id: String,
+    /// Tool that produced it.
+    pub tool: String,
+    /// Pointer to the array node inside the shape.
+    pub json_pointer: String,
+    /// Identifiers collected within this observation.
+    pub identifiers_inside: usize,
+    /// Later accepted probes citing an id from this observation.
+    pub downstream_samples: usize,
+}
+
+/// A safe-read tool that has not been run yet.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct UnexecutedSafeRead {
+    pub tool: String,
+    /// One of `SafeRead | ConstrainedRead | PureComputation`.
+    pub risk: RiskClass,
+    /// First sentence of the tool's declared description, trimmed to ~140 chars.
+    pub why_useful: String,
+}
+
+/// An identifier seen in output but never used as a get-by-id argument.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct UntraversedIdentifier {
+    pub name: String,
+    /// Redaction survivor only (never a `[REDACTED…]` value).
+    pub value: String,
+    /// Cite this as `provenance.observation_id`.
+    pub observation_id: String,
+    /// Cite this as `provenance.json_pointer`.
+    pub json_pointer: String,
+    /// Tools whose schema has a matching param (heuristic).
+    pub likely_consumer_tools: Vec<String>,
+}
+
+/// An unused tool whose schema exposes sampling/ordering params.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SamplingHint {
+    pub tool: String,
+    /// Matched schema param names, e.g. `["orderBy","pageSize"]`.
+    pub params: Vec<String>,
+}
+
+/// Pure coverage counts. Never a verdict.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DepthSignal {
+    pub structures_observed: usize,
+    pub safe_reads_covered: usize,
+    pub safe_reads_total: usize,
+    pub identifiers_traversed: usize,
+    pub identifiers_observed: usize,
+    /// `runtime_budget.probes_executed`.
+    pub probes_executed: u32,
+    /// `budgets.max_mcp_probes` (remaining = budget - executed).
+    pub probe_budget: u32,
 }
 
 impl ProfilingSession {
@@ -706,6 +784,7 @@ impl ProfilingSession {
             reason: record.runtime_decision.reason.clone(),
             risk: record.risk.clone(),
             observation: None,
+            gaps: GapReport::default(),
         };
         if let Some(observation) = observation {
             self.open_question = next_information_gap(&observation, &decision);
@@ -713,7 +792,20 @@ impl ProfilingSession {
             self.observations.push(observation);
         }
         self.probe_log.push(record);
+        outcome.gaps = self.gaps(); // reflects this probe
         outcome
+    }
+
+    /// Read-only gap report from current session state. No target calls.
+    #[must_use]
+    pub fn gaps(&self) -> GapReport {
+        compute_gaps(
+            &self.catalogue,
+            &self.observations,
+            &self.probe_log,
+            self.budgets.max_mcp_probes,
+            self.runtime_budget.probes_executed,
+        )
     }
 
     /// Deterministically assembles and writes the full artifact set from the
@@ -741,6 +833,264 @@ impl ProfilingSession {
             profile,
             output_dir: self.output_dir,
         })
+    }
+}
+
+/// Schema param names that signal an unused tool can sample smarter (order by
+/// recency, page, filter/query) instead of blind first-N. Normalized form.
+const SAMPLING_PARAM_HINTS: &[&str] = &[
+    "orderby",
+    "sort",
+    "modifiedtime",
+    "updated",
+    "pagesize",
+    "pagetoken",
+    "limit",
+    "count",
+    "q",
+    "query",
+    "filter",
+];
+
+/// Computes a read-only [`GapReport`] from resident session state. No target
+/// calls, no expensive recompute — this only reads what was already gathered.
+fn compute_gaps(
+    catalogue: &ToolCatalogue,
+    observations: &[NormalizedObservation],
+    probe_log: &[ProbeRecord],
+    probe_budget: u32,
+    probes_executed: u32,
+) -> GapReport {
+    // Tools whose probe was accepted (stop-probes carry `None` — guarded).
+    let executed: std::collections::BTreeSet<String> = probe_log
+        .iter()
+        .filter(|record| record.runtime_decision.outcome == RuntimeOutcome::Accepted)
+        .filter_map(|record| record.decision.selected_tool.clone())
+        .collect();
+
+    // (observation_id, json_pointer) pairs an accepted probe traversed via
+    // `Observed` provenance — the reliable identifier-traversal signal.
+    let traversed: std::collections::BTreeSet<(String, String)> = probe_log
+        .iter()
+        .filter(|record| record.runtime_decision.outcome == RuntimeOutcome::Accepted)
+        .flat_map(|record| record.decision.argument_provenance.iter())
+        .filter_map(|provenance| match &provenance.source {
+            ArgumentSource::Observed {
+                observation_id,
+                json_pointer,
+            } => Some((observation_id.clone(), json_pointer.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // Safe reads not yet run.
+    let unexecuted_safe_reads: Vec<UnexecutedSafeRead> = catalogue
+        .tools
+        .iter()
+        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| !executed.contains(&tool.raw.name))
+        .map(|tool| UnexecutedSafeRead {
+            tool: tool.raw.name.clone(),
+            risk: tool.card.risk.clone(),
+            why_useful: first_sentence(&tool.raw.description),
+        })
+        .collect();
+    let safe_reads_total = catalogue
+        .tools
+        .iter()
+        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .count();
+
+    // Identifiers observed but never used as a get-by-id argument.
+    let mut untraversed_identifiers = Vec::new();
+    let mut identifiers_observed = 0usize;
+    let mut identifiers_traversed = 0usize;
+    for observation in observations {
+        for identifier in &observation.identifiers {
+            identifiers_observed += 1;
+            let key = (
+                identifier.observation_id.clone(),
+                identifier.json_pointer.clone(),
+            );
+            if traversed.contains(&key) {
+                identifiers_traversed += 1;
+            } else {
+                untraversed_identifiers.push(UntraversedIdentifier {
+                    name: identifier.name.clone(),
+                    value: identifier.value.clone(),
+                    observation_id: identifier.observation_id.clone(),
+                    json_pointer: identifier.json_pointer.clone(),
+                    likely_consumer_tools: tools_matching_param(catalogue, &identifier.name),
+                });
+            }
+        }
+    }
+
+    // Listed collections nobody drilled into.
+    let mut unsampled_structures = Vec::new();
+    let mut structures_observed = 0usize;
+    for observation in observations {
+        let mut pointers = Vec::new();
+        collect_array_pointers(&observation.shape, "", &mut pointers);
+        structures_observed += pointers.len();
+        let downstream_samples = probe_log
+            .iter()
+            .filter(|record| record.runtime_decision.outcome == RuntimeOutcome::Accepted)
+            .filter(|record| {
+                record
+                    .decision
+                    .argument_provenance
+                    .iter()
+                    .any(|provenance| {
+                        matches!(
+                            &provenance.source,
+                            ArgumentSource::Observed { observation_id, .. }
+                                if *observation_id == observation.id
+                        )
+                    })
+            })
+            .count();
+        if downstream_samples == 0 {
+            for pointer in pointers {
+                unsampled_structures.push(UnsampledStructure {
+                    observation_id: observation.id.clone(),
+                    tool: observation.tool.clone(),
+                    json_pointer: pointer,
+                    identifiers_inside: observation.identifiers.len(),
+                    downstream_samples,
+                });
+            }
+        }
+    }
+
+    // Sampling/ordering params on unused tools.
+    let sampling_hints: Vec<SamplingHint> = catalogue
+        .tools
+        .iter()
+        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| !executed.contains(&tool.raw.name))
+        .filter_map(|tool| {
+            let params: Vec<String> = schema_property_keys(&tool.raw.input_schema)
+                .into_iter()
+                .filter(|key| SAMPLING_PARAM_HINTS.contains(&normalize_param(key).as_str()))
+                .collect();
+            if params.is_empty() {
+                None
+            } else {
+                Some(SamplingHint {
+                    tool: tool.raw.name.clone(),
+                    params,
+                })
+            }
+        })
+        .collect();
+
+    let safe_reads_covered = safe_reads_total - unexecuted_safe_reads.len();
+    GapReport {
+        unsampled_structures,
+        unexecuted_safe_reads,
+        untraversed_identifiers,
+        sampling_hints,
+        depth_signal: DepthSignal {
+            structures_observed,
+            safe_reads_covered,
+            safe_reads_total,
+            identifiers_traversed,
+            identifiers_observed,
+            probes_executed,
+            probe_budget,
+        },
+    }
+}
+
+/// First sentence of a tool description (split on `. ` or newline), trimmed to
+/// ~140 chars. A tiny presentation helper for `why_useful`.
+fn first_sentence(description: &str) -> String {
+    let line = description.trim().split('\n').next().unwrap_or("").trim();
+    let sentence = match line.find(". ") {
+        Some(index) => &line[..=index], // keep the terminating period
+        None => line,
+    };
+    let sentence = sentence.trim();
+    if sentence.chars().count() > 140 {
+        sentence
+            .chars()
+            .take(140)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    } else {
+        sentence.to_string()
+    }
+}
+
+/// Property keys declared in a tool's `input_schema.properties`.
+fn schema_property_keys(input_schema: &Value) -> Vec<String> {
+    input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Case- and separator-insensitive normalization: lowercase, drop `_`/`-`.
+fn normalize_param(name: &str) -> String {
+    name.chars()
+        .filter(|character| *character != '_' && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Heuristic: onboarding-allowed tools whose schema (or, as a fallback, declared
+/// arguments) expose a param matching an observed identifier name — a normalized
+/// exact match, or a shared non-empty `*id` stem. Restricted to tools DiscoMCP
+/// permits during onboarding so the hint never steers a probe into a rejection.
+/// Reported as a hint, never a guarantee.
+fn tools_matching_param(catalogue: &ToolCatalogue, identifier_name: &str) -> Vec<String> {
+    let target = normalize_param(identifier_name);
+    let target_stem = target.strip_suffix("id").filter(|stem| !stem.is_empty());
+    catalogue
+        .tools
+        .iter()
+        .filter(|tool| tool.card.risk.is_allowed_during_onboarding())
+        .filter(|tool| {
+            let mut params = schema_property_keys(&tool.raw.input_schema);
+            if params.is_empty() {
+                params = tool
+                    .card
+                    .required_arguments
+                    .iter()
+                    .chain(tool.card.optional_arguments.iter())
+                    .cloned()
+                    .collect();
+            }
+            params.iter().any(|param| {
+                let normalized = normalize_param(param);
+                normalized == target
+                    || matches!(
+                        (target_stem, normalized.strip_suffix("id")),
+                        (Some(a), Some(b)) if !b.is_empty() && a == b
+                    )
+            })
+        })
+        .map(|tool| tool.raw.name.clone())
+        .collect()
+}
+
+/// Walks a normalized `shape` value collecting JSON pointers to every
+/// `{"type":"array"}` node.
+fn collect_array_pointers(shape: &Value, pointer: &str, out: &mut Vec<String>) {
+    if let Value::Object(map) = shape {
+        if map.get("type").and_then(Value::as_str) == Some("array") {
+            out.push(pointer.to_string());
+            if let Some(items) = map.get("items") {
+                collect_array_pointers(items, &format!("{pointer}/items"), out);
+            }
+            return;
+        }
+        for (key, child) in map {
+            collect_array_pointers(child, &format!("{pointer}/{key}"), out);
+        }
     }
 }
 
@@ -1641,5 +1991,300 @@ mod tests {
             .any(|record| record.runtime_decision.outcome == RuntimeOutcome::Accepted));
         assert!(!result.profile.workspace_model.uncertainties.is_empty());
         let _ = fs::remove_dir_all(output);
+    }
+
+    // ---- Feature A: gap-report unit tests (compute_gaps, no live client) ----
+
+    use crate::model::{ArgumentProvenance, CataloguedTool, ObservedIdentifier, RawTool};
+
+    fn safe_tool(name: &str, desc: &str, schema: Value) -> CataloguedTool {
+        CataloguedTool {
+            raw: RawTool {
+                name: name.to_string(),
+                description: desc.to_string(),
+                input_schema: schema,
+                ..RawTool::default()
+            },
+            card: ToolCard {
+                name: name.to_string(),
+                risk: RiskClass::SafeRead,
+                ..ToolCard::default()
+            },
+        }
+    }
+
+    fn mutation_tool(name: &str) -> CataloguedTool {
+        CataloguedTool {
+            raw: RawTool {
+                name: name.to_string(),
+                ..RawTool::default()
+            },
+            card: ToolCard {
+                name: name.to_string(),
+                risk: RiskClass::Mutation,
+                ..ToolCard::default()
+            },
+        }
+    }
+
+    fn mutation_tool_with_schema(name: &str, schema: Value) -> CataloguedTool {
+        CataloguedTool {
+            raw: RawTool {
+                name: name.to_string(),
+                input_schema: schema,
+                ..RawTool::default()
+            },
+            card: ToolCard {
+                name: name.to_string(),
+                risk: RiskClass::Mutation,
+                ..ToolCard::default()
+            },
+        }
+    }
+
+    fn gap_catalogue(tools: Vec<CataloguedTool>) -> ToolCatalogue {
+        ToolCatalogue {
+            tools,
+            ..ToolCatalogue::default()
+        }
+    }
+
+    fn ident(
+        name: &str,
+        value: &str,
+        observation_id: &str,
+        json_pointer: &str,
+    ) -> ObservedIdentifier {
+        ObservedIdentifier {
+            name: name.to_string(),
+            value: value.to_string(),
+            observation_id: observation_id.to_string(),
+            json_pointer: json_pointer.to_string(),
+            ..ObservedIdentifier::default()
+        }
+    }
+
+    fn obs(
+        id: &str,
+        tool: &str,
+        shape: Value,
+        identifiers: Vec<ObservedIdentifier>,
+    ) -> NormalizedObservation {
+        NormalizedObservation {
+            id: id.to_string(),
+            tool: tool.to_string(),
+            shape,
+            identifiers,
+            ..NormalizedObservation::default()
+        }
+    }
+
+    fn observed_prov(observation_id: &str, json_pointer: &str) -> ArgumentProvenance {
+        ArgumentProvenance {
+            json_pointer: json_pointer.to_string(),
+            source: ArgumentSource::Observed {
+                observation_id: observation_id.to_string(),
+                json_pointer: json_pointer.to_string(),
+            },
+        }
+    }
+
+    fn accepted_probe(tool: &str, provenance: Vec<ArgumentProvenance>) -> ProbeRecord {
+        ProbeRecord {
+            decision: ProbeDecision {
+                selected_tool: Some(tool.to_string()),
+                argument_provenance: provenance,
+                ..ProbeDecision::default()
+            },
+            runtime_decision: RuntimeDecision {
+                outcome: RuntimeOutcome::Accepted,
+                reason: String::new(),
+            },
+            ..ProbeRecord::default()
+        }
+    }
+
+    #[test]
+    fn gaps_unexecuted_safe_reads_excludes_executed_and_mutation() {
+        let cat = gap_catalogue(vec![
+            safe_tool("A", "First tool. More text.", json!({})),
+            safe_tool("B", "Bee does things. Ignore this.", json!({})),
+            mutation_tool("M"),
+        ]);
+        let probes = vec![accepted_probe("A", vec![])];
+        let gaps = compute_gaps(&cat, &[], &probes, 10, 1);
+        assert_eq!(gaps.unexecuted_safe_reads.len(), 1);
+        assert_eq!(gaps.unexecuted_safe_reads[0].tool, "B");
+        assert_eq!(gaps.unexecuted_safe_reads[0].why_useful, "Bee does things.");
+    }
+
+    #[test]
+    fn gaps_identifier_untraversed_then_traversed() {
+        let schema = json!({"type":"object","properties":{"document_id":{"type":"string"}}});
+        let cat = gap_catalogue(vec![
+            safe_tool("get_doc", "Gets a doc.", schema.clone()),
+            // A mutation consuming the same param must never be offered as a
+            // likely consumer — following that hint would hit an execute_probe
+            // rejection.
+            mutation_tool_with_schema("delete_doc", schema),
+        ]);
+        let observations = vec![obs(
+            "obs-1",
+            "list",
+            json!({}),
+            vec![ident("document_id", "D1", "obs-1", "/items/0/document_id")],
+        )];
+        let gaps = compute_gaps(&cat, &observations, &[], 10, 0);
+        assert_eq!(gaps.untraversed_identifiers.len(), 1);
+        assert_eq!(
+            gaps.untraversed_identifiers[0].likely_consumer_tools,
+            vec!["get_doc".to_string()]
+        );
+        assert_eq!(gaps.depth_signal.identifiers_traversed, 0);
+
+        let probes = vec![accepted_probe(
+            "get_doc",
+            vec![observed_prov("obs-1", "/items/0/document_id")],
+        )];
+        let gaps = compute_gaps(&cat, &observations, &probes, 10, 1);
+        assert!(gaps.untraversed_identifiers.is_empty());
+        assert_eq!(gaps.depth_signal.identifiers_traversed, 1);
+    }
+
+    #[test]
+    fn gaps_unsampled_structure_drops_after_downstream_probe() {
+        let shape = json!({"type":"array","items":{"id":"string"}});
+        let ids = vec![
+            ident("id", "a", "obs-1", "/0/id"),
+            ident("id", "b", "obs-1", "/1/id"),
+            ident("id", "c", "obs-1", "/2/id"),
+        ];
+        let observations = vec![obs("obs-1", "list", shape, ids)];
+        let cat = gap_catalogue(vec![]);
+        let gaps = compute_gaps(&cat, &observations, &[], 10, 0);
+        assert_eq!(gaps.unsampled_structures.len(), 1);
+        assert_eq!(gaps.unsampled_structures[0].downstream_samples, 0);
+        assert_eq!(gaps.unsampled_structures[0].identifiers_inside, 3);
+
+        let probes = vec![accepted_probe("get", vec![observed_prov("obs-1", "/0/id")])];
+        let gaps = compute_gaps(&cat, &observations, &probes, 10, 1);
+        assert!(gaps.unsampled_structures.is_empty());
+    }
+
+    #[test]
+    fn gaps_sampling_hints_match_case_and_separator_insensitively() {
+        let schema = json!({"type":"object","properties":{"orderBy":{},"pageSize":{},"name":{}}});
+        let cat = gap_catalogue(vec![
+            safe_tool("list_x", "Lists.", schema.clone()),
+            // A mutation exposing a sampling param must never be offered as a
+            // sampling hint — probing it would hit an execute_probe rejection.
+            mutation_tool_with_schema("delete_all", schema),
+        ]);
+        let gaps = compute_gaps(&cat, &[], &[], 10, 0);
+        assert_eq!(gaps.sampling_hints.len(), 1);
+        assert_eq!(gaps.sampling_hints[0].tool, "list_x");
+        let mut params = gaps.sampling_hints[0].params.clone();
+        params.sort();
+        assert_eq!(params, vec!["orderBy".to_string(), "pageSize".to_string()]);
+
+        let probes = vec![accepted_probe("list_x", vec![])];
+        let gaps = compute_gaps(&cat, &[], &probes, 10, 1);
+        assert!(gaps.sampling_hints.is_empty());
+    }
+
+    #[test]
+    fn gaps_depth_signal_counts_are_exact() {
+        let cat = gap_catalogue(vec![
+            safe_tool("A", "a", json!({})),
+            safe_tool(
+                "get",
+                "g",
+                json!({"type":"object","properties":{"thing_id":{}}}),
+            ),
+            mutation_tool("M"),
+        ]);
+        let observations = vec![obs(
+            "obs-1",
+            "list",
+            json!({"type":"object"}),
+            vec![
+                ident("thing_id", "T", "obs-1", "/thing_id"),
+                ident("other_id", "O", "obs-1", "/other_id"),
+            ],
+        )];
+        let probes = vec![accepted_probe(
+            "A",
+            vec![observed_prov("obs-1", "/thing_id")],
+        )];
+        let ds = compute_gaps(&cat, &observations, &probes, 8, 1).depth_signal;
+        assert_eq!(ds.safe_reads_total, 2);
+        assert_eq!(ds.safe_reads_covered, 1);
+        assert_eq!(ds.identifiers_observed, 2);
+        assert_eq!(ds.identifiers_traversed, 1);
+        assert_eq!(ds.structures_observed, 0);
+        assert_eq!(ds.probes_executed, 1);
+        assert_eq!(ds.probe_budget, 8);
+    }
+
+    #[test]
+    fn gaps_stop_probe_is_not_counted_as_executed() {
+        let stop = ProbeRecord {
+            decision: ProbeDecision {
+                selected_tool: None,
+                stop: true,
+                ..ProbeDecision::default()
+            },
+            runtime_decision: RuntimeDecision {
+                outcome: RuntimeOutcome::Accepted,
+                reason: String::new(),
+            },
+            ..ProbeRecord::default()
+        };
+        let cat = gap_catalogue(vec![safe_tool("A", "a", json!({}))]);
+        let gaps = compute_gaps(&cat, &[], &[stop], 10, 0);
+        assert_eq!(gaps.unexecuted_safe_reads.len(), 1);
+    }
+
+    #[test]
+    fn gaps_shrink_monotonically_as_probes_close_gaps() {
+        let schema = json!({"type":"object","properties":{"document_id":{}}});
+        let cat = gap_catalogue(vec![
+            safe_tool("A", "a", json!({})),
+            safe_tool("get_doc", "g", schema),
+        ]);
+        let observations = vec![obs(
+            "obs-1",
+            "list",
+            json!({}),
+            vec![ident("document_id", "D", "obs-1", "/document_id")],
+        )];
+        let g0 = compute_gaps(&cat, &observations, &[], 10, 0);
+        let p1 = vec![accepted_probe("A", vec![])];
+        let g1 = compute_gaps(&cat, &observations, &p1, 10, 1);
+        let mut p2 = p1.clone();
+        p2.push(accepted_probe(
+            "get_doc",
+            vec![observed_prov("obs-1", "/document_id")],
+        ));
+        let g2 = compute_gaps(&cat, &observations, &p2, 10, 2);
+        assert!(g0.unexecuted_safe_reads.len() >= g1.unexecuted_safe_reads.len());
+        assert!(g1.unexecuted_safe_reads.len() >= g2.unexecuted_safe_reads.len());
+        assert!(g0.untraversed_identifiers.len() >= g1.untraversed_identifiers.len());
+        assert!(g1.untraversed_identifiers.len() >= g2.untraversed_identifiers.len());
+    }
+
+    #[test]
+    fn gaps_never_leak_sample_or_redacted_payload() {
+        let mut observation = obs(
+            "obs-1",
+            "get",
+            json!({"type":"object"}),
+            vec![ident("id", "clean-id", "obs-1", "/id")],
+        );
+        observation.sample = json!({"secret":"[REDACTED:email]","note":"hi"});
+        let gaps = compute_gaps(&gap_catalogue(vec![]), &[observation], &[], 10, 0);
+        let serialized = serde_json::to_string(&gaps).expect("serialize gaps");
+        assert!(!serialized.contains("\"sample\""));
+        assert!(!serialized.contains("[REDACTED"));
     }
 }

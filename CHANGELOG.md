@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-11
+
+### Added
+
+- Adaptive exploration: every `execute_probe` result and a new `session_status` tool carry a `gaps` report so the agent can decide how deep to explore. The report is computed purely from in-session state (no extra target calls) and lists unsampled structures, unexecuted safe-read tools, untraversed identifiers (with the tools likely to consume them), sampling hints (schema params like `orderBy`/`pageSize`/`q`/`filter` that enable most-recent/most-relevant sampling), and a pure-count `depth_signal`. DiscoMCP reports; the agent decides when to stop. Hint lists only surface onboarding-allowed tools, so following a gap never leads into a rejected probe.
+- Background-subagent profiling guidance: the MCP `instructions` and the generated `SKILL.md`/`AGENTS.md` now tell a host agent to profile (and refresh) in a non-blocking background subagent, driven by the gap report, so the user's foreground work is never blocked.
+
 ## [0.3.0] - 2026-07-11
 
 ### Added

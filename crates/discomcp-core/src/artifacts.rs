@@ -495,6 +495,16 @@ fn render_skill(profile: &TargetProfile) -> String {
     output.push_str(
         "- `user_defined`: Which planned actions should always require confirmation?\n\n",
     );
+    output.push_str("## Refreshing This Skill In The Background\n\n");
+    output.push_str(
+        "`user_defined`: This skill was built by a DiscoMCP profiling session. If `lookup_target` \
+         misses (the catalogue fingerprint below no longer matches the live target) or this profile \
+         is stale, re-profile in a BACKGROUND subagent so the user is not blocked: run `discomcp serve`, \
+         then inspect_target -> execute_probe in a loop driven by each result's `gaps` report \
+         (or session_status) -> stop when unexecuted_safe_reads and untraversed_identifiers are near \
+         empty or the probe budget is reached -> finalize_profile, and report the new SKILL.md path. \
+         Never run mutation/side-effect/destructive/admin tools during a refresh.\n\n",
+    );
     output.push_str("## Profile Freshness\n\n");
     output.push_str(&format!(
         "`observed`: Profile generated at Unix timestamp `{}` from catalogue fingerprint `{}`. Refresh before relying on long-lived assumptions.\n",
@@ -529,7 +539,7 @@ fn append_workflows(output: &mut String, operational: &OperationalModel) {
 
 fn render_agents(profile: &TargetProfile, output_dir: &Path) -> String {
     format!(
-        "# DiscoMCP Target Instructions\n\nTarget: `{}`\nProfile: `{}`\n\nRead `SKILL.md`, `workspace-model.json`, and `operational-model.json` before operating this target.\n\n- Use only cached target tool names from `tool-catalogue.json`.\n- Validate arguments against the target schema and derive IDs from observed output.\n- Never execute mutation, external side-effect, destructive, administrative, arbitrary-execution, or unknown tools during onboarding.\n- Require explicit confirmation before any documented state-changing operation.\n- Refresh this profile with `discomcp refresh {}` before relying on stale workspace assumptions.\n- Run the generated behavioral checks from `evals.yml` after updating the profile.\n\nKnown uncertainties are in `workspace-model.json`.\n",
+        "# DiscoMCP Target Instructions\n\nTarget: `{}`\nProfile: `{}`\n\nRead `SKILL.md`, `workspace-model.json`, and `operational-model.json` before operating this target.\n\n- Use only cached target tool names from `tool-catalogue.json`.\n- Validate arguments against the target schema and derive IDs from observed output.\n- Never execute mutation, external side-effect, destructive, administrative, arbitrary-execution, or unknown tools during onboarding.\n- Require explicit confirmation before any documented state-changing operation.\n- If stale or `lookup_target` misses, refresh in a BACKGROUND subagent (non-blocking): `discomcp serve`, then inspect_target -> execute_probe gap loop (guided by each result's `gaps` / session_status) -> finalize_profile, and report the new SKILL.md path. Fallback: `discomcp refresh {}`.\n- Run the generated behavioral checks from `evals.yml` after updating the profile.\n\nKnown uncertainties are in `workspace-model.json`.\n",
         profile.metadata.target_id,
         output_dir.display(),
         profile.metadata.target_id
@@ -634,5 +644,21 @@ fn risk_label(risk: &crate::model::RiskClass) -> &'static str {
         crate::model::RiskClass::Administrative => "administrative",
         crate::model::RiskClass::ArbitraryExecution => "arbitrary_execution",
         crate::model::RiskClass::Unknown => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_skill;
+    use crate::model::TargetProfile;
+
+    /// The background-refresh section is static text, independent of the probe
+    /// log / observations that `regenerate_skill` rebuilds as `default()`. So it
+    /// must render identically from a default profile — the regenerate invariant.
+    #[test]
+    fn skill_contains_the_background_refresh_section() {
+        let skill = render_skill(&TargetProfile::default());
+        assert!(skill.contains("## Refreshing This Skill In The Background"));
+        assert!(skill.contains("BACKGROUND subagent"));
     }
 }

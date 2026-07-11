@@ -19,13 +19,23 @@ use tokio::runtime::Handle;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 const INSTRUCTIONS: &str = "DiscoMCP is a safety runtime for profiling an unknown target MCP; \
-you are the reasoning brain. Workflow: (1) list_targets to see configured targets; \
-(2) optionally lookup_target to check for an existing skill; (3) inspect_target to connect, \
-classify each tool's risk, and start a session (returns tool_cards); (4) execute_probe repeatedly \
-to safely read the target — DiscoMCP enforces risk class, JSON-schema validation, identifier \
-provenance, sampling limits, and the probe budget, returning a redacted observation or a rejection \
-reason to learn from; (5) finalize_profile to synthesize and write the workspace model, operational \
-model and SKILL.md. generate_skill regenerates SKILL.md from an existing profile directory.";
+you are the reasoning brain. Run profiling in a BACKGROUND SUBAGENT so the user's foreground work \
+is never blocked. Workflow: (1) list_targets to see configured targets; (2) lookup_target — if it \
+returns no existing_skill_dir (a MISS), dispatch a non-blocking background subagent to build the \
+skill and continue the user's task meanwhile; (3) inspect_target to connect, classify each tool's \
+risk, and start a session (returns tool_cards); (4) execute_probe in a loop, each result carries a \
+`gaps` report (unsampled_structures, unexecuted_safe_reads, untraversed_identifiers, sampling_hints, \
+depth_signal) — let the gaps drive the next probe: traverse an untraversed_identifier with its cited \
+provenance, run an unexecuted_safe_read, or use a sampling_hint param (orderBy/pageSize/q/filter) to \
+sample most-recent instead of blind first-N; call session_status anytime for the same report without \
+spending a probe. DiscoMCP enforces risk class, JSON-schema validation, identifier provenance, \
+sampling limits, and the probe budget, returning a redacted observation or a rejection reason to \
+learn from. STOP when the gaps are sufficiently closed (unexecuted_safe_reads and \
+untraversed_identifiers near empty, or depth_signal.probes_executed approaching probe_budget) — \
+DiscoMCP reports, you decide; the only hard stop is the \"MCP probe budget is exhausted\" rejection. \
+(5) finalize_profile to synthesize and write the workspace model, operational model and SKILL.md, \
+then report the returned skill_path back to the user. generate_skill regenerates SKILL.md from an \
+existing profile directory.";
 
 /// Runs the blocking JSON-RPC loop until stdin EOF.
 pub fn run(core: DiscoMcp) -> Result<()> {
@@ -102,6 +112,7 @@ fn call_tool(
         "inspect_target" => handle_inspect(arguments, core, sessions, handle),
         "execute_probe" => handle_execute_probe(arguments, sessions, handle),
         "finalize_profile" => handle_finalize(arguments, sessions),
+        "session_status" => handle_session_status(arguments, sessions),
         "generate_skill" => handle_generate_skill(arguments),
         _ => return None,
     };
@@ -241,6 +252,16 @@ fn handle_finalize(arguments: &Value, sessions: &mut HashMap<String, ProfilingSe
     }
 }
 
+fn handle_session_status(arguments: &Value, sessions: &HashMap<String, ProfilingSession>) -> Value {
+    let Some(target) = string_arg(arguments, "target") else {
+        return tool_err("missing required `target` argument");
+    };
+    let Some(session) = sessions.get(&target) else {
+        return tool_err("no active session; call inspect_target first");
+    };
+    tool_ok(serde_json::to_value(session.gaps()).unwrap_or_else(|_| json!({})))
+}
+
 fn handle_generate_skill(arguments: &Value) -> Value {
     let Some(profile_dir) = string_arg(arguments, "profile_dir") else {
         return tool_err("missing required `profile_dir` argument");
@@ -291,7 +312,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "lookup_target",
-            "description": "Check whether a DiscoMCP skill already covers this target's current declared catalogue, without probing.",
+            "description": "Check whether a DiscoMCP skill already covers this target's current declared catalogue, without probing. A MISS (no existing_skill_dir) means dispatch a BACKGROUND subagent to profile the target (inspect_target -> execute_probe gap loop -> finalize_profile) and keep working the user's task while it runs.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],
@@ -312,7 +333,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "execute_probe",
-            "description": "Validate and, if safe, execute ONE tool call against the target. DiscoMCP enforces risk class (only safe reads run), JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation they came from), sampling limits, and the probe budget. Returns a redacted observation (shape, sample, identifiers, enum values) on acceptance, or the reason it was rejected.",
+            "description": "Validate and, if safe, execute ONE tool call against the target. DiscoMCP enforces risk class (only safe reads run), JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation they came from), sampling limits, and the probe budget. Returns a redacted observation (shape, sample, identifiers, enum values) on acceptance, or the reason it was rejected. Every result also includes a `gaps` report (unsampled_structures, unexecuted_safe_reads, untraversed_identifiers, sampling_hints, depth_signal) to drive the next probe; call session_status for it without spending a probe.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target", "tool", "arguments"],
@@ -347,7 +368,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "finalize_profile",
-            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. Deterministic — no reasoning backend needed.",
+            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. Deterministic — no reasoning backend needed. Returns skill_path (the written SKILL.md) to report back to the user.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],
@@ -361,6 +382,15 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "required": ["profile_dir"],
                 "properties": {"profile_dir": {"type": "string"}}
+            }
+        },
+        {
+            "name": "session_status",
+            "description": "Return the current GAP REPORT for an active session, computed only from state already gathered — no target calls, no probe consumed. Reports (does not decide): unsampled_structures (collections listed but never drilled into), unexecuted_safe_reads (safe tools not yet run, with why_useful), untraversed_identifiers (ids seen in output but never used as a get-by-id argument, with likely_consumer_tools), sampling_hints (schema params like orderBy/pageSize/q/filter on unused tools for smart sampling), and depth_signal (raw coverage counts + probe budget). The same report rides every execute_probe result under `gaps`. You decide when coverage is enough.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["target"],
+                "properties": {"target": {"type": "string"}}
             }
         }
     ])
@@ -394,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_exposes_the_six_backed_tools() {
+    fn tools_list_exposes_the_backed_tools() {
         let response = dispatch_for(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
         let tools = response["result"]["tools"].as_array().expect("tools array");
         let names = tools
@@ -410,6 +440,7 @@ mod tests {
                 "execute_probe",
                 "finalize_profile",
                 "generate_skill",
+                "session_status",
             ]
         );
         assert!(tools.iter().all(|tool| tool["inputSchema"].is_object()));
@@ -426,6 +457,123 @@ mod tests {
     fn ping_returns_an_empty_result() {
         let response = dispatch_for(&json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}));
         assert_eq!(response["result"], json!({}));
+    }
+
+    /// A stateful harness so a sequence of tool calls shares one session map.
+    struct Harness {
+        runtime: Runtime,
+        core: DiscoMcp,
+        sessions: HashMap<String, ProfilingSession>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self {
+                runtime: Runtime::new().expect("tokio runtime"),
+                core: DiscoMcp::new(DiscoMcpConfig::builtin_mock()),
+                sessions: HashMap::new(),
+            }
+        }
+
+        fn call(&mut self, request: &Value) -> Value {
+            let handle = self.runtime.handle().clone();
+            let id = request.get("id").cloned().unwrap_or(Value::Null);
+            dispatch(request, id, &self.core, &mut self.sessions, &handle)
+        }
+
+        fn tool(&mut self, id: i64, name: &str, arguments: Value) -> Value {
+            self.call(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }))
+        }
+    }
+
+    #[test]
+    fn gaps_ride_the_wire_and_traversal_shrinks_them() {
+        let mut harness = Harness::new();
+        harness.call(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}));
+        let inspect = harness.tool(2, "inspect_target", json!({"target": "mock-collection"}));
+        assert_eq!(inspect["result"]["isError"], false);
+
+        // First safe read: list the collections.
+        let probe = harness.tool(
+            3,
+            "execute_probe",
+            json!({"target": "mock-collection", "tool": "list_collections", "arguments": {}}),
+        );
+        let gaps = probe["result"]["structuredContent"]["gaps"].clone();
+        assert!(!gaps["unexecuted_safe_reads"]
+            .as_array()
+            .expect("unexecuted array")
+            .is_empty());
+        assert!(!gaps["untraversed_identifiers"]
+            .as_array()
+            .expect("untraversed array")
+            .is_empty());
+        assert!(
+            gaps["depth_signal"]["probe_budget"]
+                .as_u64()
+                .expect("budget")
+                > 0
+        );
+
+        // session_status is a pure read: identical report, no probe consumed.
+        let status = harness.tool(4, "session_status", json!({"target": "mock-collection"}));
+        assert_eq!(status["result"]["isError"], false);
+        assert_eq!(status["result"]["structuredContent"], gaps);
+
+        let unexecuted_before = gaps["unexecuted_safe_reads"].as_array().unwrap().len();
+        let traversed_before = gaps["depth_signal"]["identifiers_traversed"]
+            .as_u64()
+            .unwrap();
+
+        // Traverse one listed identifier via observed provenance (get-by-id).
+        let traverse = harness.tool(
+            5,
+            "execute_probe",
+            json!({
+                "target": "mock-collection",
+                "tool": "describe_collection",
+                "arguments": {"collection_id": "projects"},
+                "provenance": [{
+                    "json_pointer": "/collection_id",
+                    "source": {
+                        "kind": "observed",
+                        "observation_id": "probe-001",
+                        "json_pointer": "/collections/0/id"
+                    }
+                }]
+            }),
+        );
+        let after = traverse["result"]["structuredContent"]["gaps"].clone();
+        assert_eq!(
+            traverse["result"]["structuredContent"]["outcome"], "accepted",
+            "the traversal probe must be accepted"
+        );
+        // Running a new safe read shrinks the unexecuted set...
+        assert!(after["unexecuted_safe_reads"].as_array().unwrap().len() < unexecuted_before);
+        // ...and traversing an identifier is recorded (the shrinking proof).
+        assert_eq!(
+            after["depth_signal"]["identifiers_traversed"]
+                .as_u64()
+                .unwrap(),
+            traversed_before + 1
+        );
+    }
+
+    #[test]
+    fn session_status_without_a_session_is_an_error() {
+        let mut harness = Harness::new();
+        harness.call(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}));
+        let status = harness.tool(2, "session_status", json!({"target": "mock-collection"}));
+        assert_eq!(status["result"]["isError"], true);
+        let text = status["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("no active session"));
     }
 
     #[test]
