@@ -339,10 +339,11 @@ fn print_plan(plan: &ProfilePlan) {
         }
     }
     println!(
-        "Budget impact: up to {} MCP probes, {} reasoning cycles, {} samples per structure.",
+        "Budget impact: up to {} MCP probes, {} reasoning cycles, {} samples per structure, {} identifier coverage.",
         plan.budgets.max_mcp_probes,
         plan.budgets.max_reasoning_cycles,
-        plan.budgets.max_samples_per_structure
+        plan.budgets.max_samples_per_structure,
+        plan.budgets.max_identifier_coverage
     );
 }
 

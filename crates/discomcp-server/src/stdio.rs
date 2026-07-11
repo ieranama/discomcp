@@ -153,9 +153,16 @@ fn handle_inspect(
         privacy_mode: core.config().profiles.privacy_mode.clone(),
         ..ProfileOptions::default()
     };
-    if let Some(cap) = core.config().profiles.max_samples_per_structure {
+    let record_cap = core.config().profiles.max_samples_per_structure;
+    let identifier_cap = core.config().profiles.max_identifier_coverage;
+    if record_cap.is_some() || identifier_cap.is_some() {
         let mut budgets = options.effective_budgets();
-        budgets.max_samples_per_structure = cap;
+        if let Some(cap) = record_cap {
+            budgets.max_samples_per_structure = cap;
+        }
+        if let Some(cap) = identifier_cap {
+            budgets.max_identifier_coverage = cap;
+        }
         options.budgets = Some(budgets);
     }
     let session = match handle.block_on(core.start_session(&target, options)) {

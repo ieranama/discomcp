@@ -592,11 +592,23 @@ pub enum ExplorationMode {
 pub struct ExplorationBudgets {
     pub max_reasoning_cycles: u32,
     pub max_mcp_probes: u32,
+    /// How many FULL records (objects with many fields) to retain in the sample
+    /// for shape inference. Kept LOW to avoid record bloat.
     pub max_samples_per_structure: u32,
+    /// How many SHORT scalar items (names/ids/enum values) to keep from an
+    /// array in the sample. Kept HIGH so wide lists (datasets, tables, ...) are
+    /// captured completely — short strings are cheap. Does not bound the
+    /// identifier-collection walk (which is depth-bounded, not count-bounded).
+    #[serde(default = "default_identifier_coverage")]
+    pub max_identifier_coverage: u32,
     pub max_traversal_depth: u32,
     pub max_response_bytes: usize,
     pub per_call_timeout_ms: u64,
     pub consecutive_low_gain_limit: u32,
+}
+
+fn default_identifier_coverage() -> u32 {
+    250
 }
 
 impl ExplorationBudgets {
@@ -607,6 +619,7 @@ impl ExplorationBudgets {
                 max_reasoning_cycles: 2,
                 max_mcp_probes: 8,
                 max_samples_per_structure: 2,
+                max_identifier_coverage: 100,
                 max_traversal_depth: 2,
                 max_response_bytes: 128 * 1024,
                 per_call_timeout_ms: 5_000,
@@ -616,6 +629,7 @@ impl ExplorationBudgets {
                 max_reasoning_cycles: 6,
                 max_mcp_probes: 30,
                 max_samples_per_structure: 5,
+                max_identifier_coverage: 250,
                 max_traversal_depth: 4,
                 max_response_bytes: 256 * 1024,
                 per_call_timeout_ms: 8_000,
@@ -625,6 +639,7 @@ impl ExplorationBudgets {
                 max_reasoning_cycles: 20,
                 max_mcp_probes: 100,
                 max_samples_per_structure: 10,
+                max_identifier_coverage: 1_000,
                 max_traversal_depth: 6,
                 max_response_bytes: 512 * 1024,
                 per_call_timeout_ms: 12_000,

@@ -173,11 +173,16 @@ pub struct ReasoningBackendConfig {
 pub struct ProfileConfig {
     #[serde(default)]
     pub privacy_mode: PrivacyMode,
-    /// Override the per-structure array sample cap. Raise it to map wide
-    /// collections completely (e.g. every dataset/table name in a warehouse);
-    /// the mode default (5 in standard) truncates wide lists.
+    /// Override the per-structure array sample cap for FULL records (objects).
+    /// Kept low by default to avoid record bloat; raising it retains more full
+    /// records per structure for shape inference.
     #[serde(default)]
     pub max_samples_per_structure: Option<u32>,
+    /// Override the identifier/name-coverage cap. Raise it to map wide scalar
+    /// collections completely (e.g. every dataset/table name in a warehouse);
+    /// the mode default (250 in standard) already keeps most lists intact.
+    #[serde(default)]
+    pub max_identifier_coverage: Option<u32>,
 }
 
 impl Default for ProfileConfig {
@@ -185,6 +190,7 @@ impl Default for ProfileConfig {
         Self {
             privacy_mode: PrivacyMode::Balanced,
             max_samples_per_structure: None,
+            max_identifier_coverage: None,
         }
     }
 }
