@@ -79,6 +79,9 @@ struct Endpoints {
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: Option<String>,
+    /// `scopes_supported` advertised by the server; used when the config does
+    /// not set scopes (an empty `scope` is rejected as `invalid_scope`).
+    scopes_supported: Vec<String>,
 }
 
 /// Obtain a usable bearer token for `endpoint`, running only the steps that
@@ -126,11 +129,19 @@ pub async fn ensure_token(
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
+    // Configured scopes win; otherwise fall back to what the server advertises.
+    // An empty `scope` is rejected as `invalid_scope` (observed on Attio).
+    let scopes = if cfg.scopes.is_empty() {
+        endpoints.scopes_supported.clone()
+    } else {
+        cfg.scopes.clone()
+    };
+
     // (c) Dynamic Client Registration (RFC 7591) only when no client_id exists.
     let (client_id, client_secret) = if let Some(id) = cfg.client_id.clone() {
         (id, cfg.client_secret.clone())
     } else {
-        register_client(&client, &endpoints, &redirect_uri, &cfg.scopes).await?
+        register_client(&client, &endpoints, &redirect_uri, &scopes).await?
     };
 
     // (d) Authorization Code + PKCE (S256).
@@ -142,7 +153,7 @@ pub async fn ensure_token(
         &redirect_uri,
         &state,
         &challenge,
-        &cfg.scopes,
+        &scopes,
         endpoint,
     )?;
 
@@ -217,6 +228,7 @@ async fn discover_endpoints(
             authorization_endpoint,
             token_endpoint,
             registration_endpoint: cfg.registration_endpoint.clone(),
+            scopes_supported: Vec::new(),
         });
     }
 
@@ -268,11 +280,23 @@ async fn discover_endpoints(
         .registration_endpoint
         .clone()
         .or_else(|| string_field(&as_metadata, "registration_endpoint"));
+    let scopes_supported = as_metadata
+        .get("scopes_supported")
+        .and_then(Value::as_array)
+        .map(|scopes| {
+            scopes
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
 
     Ok(Endpoints {
         authorization_endpoint,
         token_endpoint,
         registration_endpoint,
+        scopes_supported,
     })
 }
 
@@ -288,14 +312,17 @@ async fn register_client(
                 .to_string(),
         )
     })?;
-    let body = json!({
+    let mut body = json!({
         "client_name": "discomcp",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
-        "scope": scopes.join(" "),
     });
+    // Only send `scope` when non-empty — an empty string is `invalid_scope`.
+    if !scopes.is_empty() {
+        body["scope"] = Value::String(scopes.join(" "));
+    }
     let response = client
         .post(registration_endpoint)
         .json(&body)
