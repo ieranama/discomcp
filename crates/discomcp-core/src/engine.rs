@@ -511,6 +511,34 @@ impl DiscoMcp {
             message: "Target declarations changed; the profile was regenerated.".to_string(),
         })
     }
+
+    /// Cheaply checks whether a skill already covers this target's current
+    /// declared catalogue, without running any exploration or reasoning.
+    pub async fn lookup(&self, target_id: &str) -> Result<LookupResult> {
+        let inspection = self.inspect(target_id).await?;
+        let existing_skill_dir =
+            find_skill_by_fingerprint(&self.config.profile_dir, &inspection.catalogue_fingerprint);
+        Ok(LookupResult {
+            target_id: target_id.to_string(),
+            catalogue_fingerprint: inspection.catalogue_fingerprint,
+            existing_skill_dir,
+        })
+    }
+}
+
+/// Scans every profile directory below `profile_dir` for one whose saved
+/// `profile-metadata.json` fingerprint matches. Returns the first match.
+fn find_skill_by_fingerprint(profile_dir: &std::path::Path, fingerprint: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(profile_dir).ok()?;
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read(path.join("profile-metadata.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ProfileMetadata>(&bytes).ok())
+                .is_some_and(|metadata| metadata.target_fingerprint == fingerprint)
+        })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -539,6 +567,13 @@ pub struct RefreshResult {
     pub changed: bool,
     pub output_dir: PathBuf,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LookupResult {
+    pub target_id: String,
+    pub catalogue_fingerprint: String,
+    pub existing_skill_dir: Option<PathBuf>,
 }
 
 async fn static_discovery(client: &mut dyn McpClient) -> Result<RawDiscovery> {
@@ -1011,6 +1046,55 @@ mod tests {
         assert_eq!(client.static_call_counts().list_resources, 2);
         assert_eq!(client.static_call_counts().list_prompts, 2);
         let _ = fs::remove_dir_all(output);
+    }
+
+    #[tokio::test]
+    async fn lookup_finds_an_existing_skill_by_fingerprint_without_probing() {
+        let parent = std::env::temp_dir().join(format!(
+            "discomcp-lookup-test-{}-{}",
+            std::process::id(),
+            now_unix_seconds()
+        ));
+        let output = parent.join("mock-collection");
+        let client = MockMcpClient::collection_fixture();
+        let app = fixture_app(
+            client.clone(),
+            Arc::new(ScriptedMockReasoningBackend::collection_fixture()),
+        );
+        app.profile(
+            "mock-collection",
+            ProfileOptions {
+                output_dir: Some(output.clone()),
+                ..ProfileOptions::default()
+            },
+        )
+        .await
+        .expect("initial profile should complete");
+
+        let mut config = DiscoMcpConfig::builtin_mock();
+        config.profile_dir = parent.clone();
+        let app = DiscoMcp::with_dependencies(
+            config,
+            Arc::new(FixtureClientFactory {
+                client: client.clone(),
+            }),
+            Arc::new(FixtureReasoningFactory {
+                backend: Arc::new(ScriptedMockReasoningBackend::collection_fixture()),
+            }),
+        );
+        let calls_before_lookup = client.calls().lock().expect("call log lock").len();
+        let found = app
+            .lookup("mock-collection")
+            .await
+            .expect("lookup should complete");
+        assert_eq!(found.existing_skill_dir, Some(output.clone()));
+        assert_eq!(
+            client.calls().lock().expect("call log lock").len(),
+            calls_before_lookup,
+            "lookup must not execute any probe"
+        );
+
+        let _ = fs::remove_dir_all(&parent);
     }
 
     #[tokio::test]

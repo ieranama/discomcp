@@ -49,6 +49,13 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Check whether a skill already covers this target's current catalogue,
+    /// without exploring or spending any reasoning calls.
+    Lookup {
+        target: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Refresh a profile only when target declarations have changed.
     Refresh {
         target: String,
@@ -108,6 +115,7 @@ async fn main() -> Result<()> {
             output,
             dry_run,
         } => profile(target, config, goal, mode, output, dry_run).await,
+        Command::Lookup { target, config } => lookup(target, config).await,
         Command::Refresh {
             target,
             config,
@@ -214,6 +222,20 @@ async fn profile(
     println!("- SKILL.md");
     println!("- AGENTS.md");
     println!("- evals.yml");
+    Ok(())
+}
+
+async fn lookup(target: String, config_path: Option<PathBuf>) -> Result<()> {
+    let discomcp = DiscoMcp::new(load_config(config_path)?);
+    let found = discomcp.lookup(&target).await?;
+    println!("Target: {}", found.target_id);
+    println!("Catalogue fingerprint: {}", found.catalogue_fingerprint);
+    match found.existing_skill_dir {
+        Some(dir) => println!("Existing skill found: {}", dir.display()),
+        None => {
+            println!("No existing skill matches this catalogue; run `profile` to generate one.")
+        }
+    }
     Ok(())
 }
 
