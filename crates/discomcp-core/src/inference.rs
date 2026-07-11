@@ -857,8 +857,28 @@ fn strip_verb_prefix(segment: &str) -> &str {
 }
 
 fn singularize(value: &str) -> String {
+    // "companies" -> "company", "entities" -> "entity"
+    if let Some(stem) = value.strip_suffix("ies") {
+        if stem.len() > 1 {
+            return format!("{stem}y");
+        }
+    }
+    // "-es" after a sibilant (s/x/z/ch/sh): "searches" -> "search",
+    // "boxes" -> "box", "statuses" -> "status". Strip only the "es".
+    if let Some(stem) = value.strip_suffix("es") {
+        if ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|sibilant| stem.ends_with(sibilant))
+        {
+            return stem.to_string();
+        }
+    }
+    // Best-effort: strip a plural "s", but leave singular nouns that happen to
+    // end in "s" — "ss" (address), Latin "-us" (status, corpus), "-is"
+    // (analysis) — unchanged.
+    let keep = value.ends_with("ss") || value.ends_with("us") || value.ends_with("is");
     match value.strip_suffix('s') {
-        Some(stem) if stem.len() > 2 && !value.ends_with("ss") => stem.to_string(),
+        Some(stem) if stem.len() > 2 && !keep => stem.to_string(),
         _ => value.to_string(),
     }
 }
@@ -931,6 +951,20 @@ mod tests {
     use crate::model::{ExplorationBudgets, PrivacyMode};
     use crate::normalization::normalize_observation;
     use crate::redaction::Redactor;
+
+    #[test]
+    fn singularize_handles_english_plural_rules() {
+        // The bug that produced "searche": naive trailing-s strip on "-es".
+        assert_eq!(singularize("searches"), "search");
+        assert_eq!(singularize("companies"), "company");
+        assert_eq!(singularize("entities"), "entity");
+        assert_eq!(singularize("statuses"), "status");
+        assert_eq!(singularize("boxes"), "box");
+        assert_eq!(singularize("items"), "item");
+        // Unchanged: non-plural and mass nouns.
+        assert_eq!(singularize("address"), "address");
+        assert_eq!(singularize("status"), "status");
+    }
 
     /// Mirrors the engine: unwrap the envelope, redact the payload, then normalize.
     /// `Balanced` is the default mode; under `Strict` an email-shaped identifier is
