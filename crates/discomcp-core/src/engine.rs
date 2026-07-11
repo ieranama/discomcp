@@ -764,6 +764,25 @@ impl ProfilingSession {
         &self.discovery.handshake.server_name
     }
 
+    /// The MCP server's own usage guidance from the handshake, if any — the
+    /// target's authoritative self-documentation for the agent to read.
+    #[must_use]
+    pub fn server_instructions(&self) -> Option<&str> {
+        self.discovery.handshake.instructions.as_deref()
+    }
+
+    /// Configured documentation locations (files/URLs) for the agent to read
+    /// before probing, plus any resource URIs the server exposes.
+    #[must_use]
+    pub fn documentation_locations(&self) -> Vec<String> {
+        self.documentation
+            .sources
+            .iter()
+            .filter(|source| source.id.starts_with("configured-doc"))
+            .map(|source| source.location.clone())
+            .collect()
+    }
+
     /// The current open question the session is trying to resolve.
     #[must_use]
     pub fn open_question(&self) -> &str {

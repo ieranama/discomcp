@@ -24,8 +24,11 @@ you are the reasoning brain. Run profiling in a BACKGROUND SUBAGENT so the user'
 is never blocked. Workflow: (1) list_targets to see configured targets; (2) lookup_target — if it \
 returns no existing_skill_dir (a MISS), dispatch a non-blocking background subagent to build the \
 skill and continue the user's task meanwhile; (3) inspect_target to connect and start a session — \
-returns tool_cards (name, description, input_schema, raw annotations, backstop_blocked). YOU \
-classify each tool's risk from its card; DiscoMCP does not guess. (4) execute_probe in a loop, \
+returns tool_cards (name, description, input_schema, raw annotations, backstop_blocked), plus \
+server_instructions (the MCP's own usage guidance) and documentation_urls. BEFORE probing, READ \
+the docs so you explore grounded, not blind: read server_instructions, fetch any documentation_urls, \
+and if the target has public official docs (e.g. the vendor's docs site), fetch and read those too \
+with your own web tools. Then YOU classify each tool's risk from its card; DiscoMCP does not guess. (4) execute_probe in a loop, \
 declaring your `classification` on every probe (only safe_read/constrained_read/pure_computation \
 run; readOnlyHint-annotated tools also run). Each result carries a `gaps` report \
 (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal) — \
@@ -202,6 +205,8 @@ fn handle_inspect(
             .collect::<Vec<_>>(),
         "catalogue_fingerprint": catalogue.fingerprint,
         "tool_cards": tool_cards,
+        "server_instructions": session.server_instructions(),
+        "documentation_urls": session.documentation_locations(),
     });
     sessions.insert(target, session);
     tool_ok(structured)
