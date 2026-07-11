@@ -15,6 +15,7 @@ use crate::config::{DiscoMcpConfig, ReasoningConfig, ResolvedTargetConfig, Trans
 use crate::envelope::unwrap_mcp_envelope;
 use crate::error::{DiscoMcpError, Result};
 use crate::inference::{infer_capability_profile, infer_workspace_model, operational_model};
+use crate::mcp::http::HttpMcpClient;
 use crate::mcp::stdio::StdioMcpClient;
 use crate::mcp::{McpClient, McpError, MockMcpClient};
 use crate::model::{
@@ -167,6 +168,15 @@ impl McpClientFactory for DefaultMcpClientFactory {
                 Ok(Box::new(
                     StdioMcpClient::spawn(command, &target.args, &target.env).await?,
                 ))
+            }
+            (TransportKind::StreamableHttp, _) => {
+                let url = target.url.as_deref().ok_or_else(|| {
+                    DiscoMcpError::Config(format!(
+                        "target `{}` uses http transport but does not define `url`",
+                        target.id
+                    ))
+                })?;
+                Ok(Box::new(HttpMcpClient::new(url, target.oauth.clone())?))
             }
             (transport, _) => Err(DiscoMcpError::UnsupportedTransport {
                 target: target.id.clone(),

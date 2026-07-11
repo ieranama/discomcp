@@ -8,6 +8,8 @@ use thiserror::Error;
 
 use crate::model::{RawPrompt, RawResource, RawTool, ServerHandshake};
 
+pub mod http;
+pub mod oauth;
 pub mod stdio;
 
 type MockResponses = BTreeMap<String, VecDeque<Result<Value, McpError>>>;

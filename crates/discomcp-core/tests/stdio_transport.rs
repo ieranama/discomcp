@@ -56,6 +56,8 @@ async fn configured_stdio_target_uses_the_real_transport_for_inspection() {
             args: Vec::new(),
             docs: Vec::new(),
             env: BTreeMap::new(),
+            url: None,
+            oauth: None,
         },
     );
     let inspection = DiscoMcp::new(config)
@@ -80,6 +82,8 @@ async fn configured_stdio_target_profiles_with_a_command_reasoning_backend() {
             args: Vec::new(),
             docs: Vec::new(),
             env: BTreeMap::new(),
+            url: None,
+            oauth: None,
         },
     );
     config.reasoning = ReasoningConfig {
