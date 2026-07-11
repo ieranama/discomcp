@@ -468,15 +468,18 @@ fn validate_sampling_limits(
     let Some(arguments) = arguments.as_object() else {
         return Ok(());
     };
+    // A list/page limit bounds how many ITEMS are requested, so it is capped by
+    // identifier coverage (high), not the full-record sample cap (low) — a list
+    // of names/ids can be pulled wide; the response-size cap still bounds bloat.
     for &key in sampling_keys() {
         if let Some(value) = arguments.get(key) {
             if value
                 .as_u64()
-                .is_none_or(|number| number > u64::from(budgets.max_samples_per_structure))
+                .is_none_or(|number| number > u64::from(budgets.max_identifier_coverage))
             {
                 return Err(format!(
-                    "sampling argument `{key}` exceeds the configured sample limit of {}",
-                    budgets.max_samples_per_structure
+                    "sampling argument `{key}` exceeds the configured limit of {}",
+                    budgets.max_identifier_coverage
                 ));
             }
         }
@@ -991,14 +994,16 @@ mod tests {
         );
         let catalogue = build_catalogue(vec![list_tool.clone()], Vec::new(), Vec::new());
         let client = client_for(list_tool, json!({"called": true}));
-        let result = execute(
+        // A list limit is bounded by identifier coverage (Quick = 100), not the
+        // low record cap, so it may exceed the sample cap — but not the coverage.
+        let over = execute(
             &client,
             &catalogue,
-            &decision("list_values", json!({"limit": 3})),
+            &decision("list_values", json!({"limit": 500})),
             &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
         )
         .await;
-        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+        assert_eq!(over.runtime_decision.outcome, RuntimeOutcome::Rejected);
         assert!(client.calls().lock().expect("lock").is_empty());
     }
 

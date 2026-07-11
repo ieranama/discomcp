@@ -38,9 +38,7 @@ pub fn unwrap_mcp_envelope(value: &Value) -> Cow<'_, Value> {
         .iter()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .map(|text| {
-            serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_string()))
-        })
+        .map(|text| parse_structured_text(text).unwrap_or_else(|| Value::String(text.to_string())))
         .collect::<Vec<_>>();
     match payloads.len() {
         0 => Cow::Borrowed(value),
@@ -50,6 +48,22 @@ pub fn unwrap_mcp_envelope(value: &Value) -> Cow<'_, Value> {
         }
         _ => Cow::Owned(Value::Array(payloads)),
     }
+}
+
+/// Parse a text content block into structure. Tries JSON, then YAML (some MCP
+/// servers, e.g. Attio, return YAML-ish text rather than JSON). Only a
+/// structural result (object/array) is accepted, so a plain prose or scalar
+/// response stays a string rather than being coerced into a number/bool.
+fn parse_structured_text(text: &str) -> Option<Value> {
+    // JSON first — any valid JSON value is honored (preserves prior behavior).
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    // Then YAML, but only when it yields structure — a prose response must not
+    // be coerced into a scalar (YAML parses "ok: done" loosely).
+    serde_yaml::from_str::<Value>(text)
+        .ok()
+        .filter(|value| value.is_object() || value.is_array())
 }
 
 /// A JSON document carried inside a string — either the string itself or an
