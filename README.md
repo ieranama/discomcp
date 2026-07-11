@@ -48,7 +48,13 @@ Sensitive reads are additionally constrained by the configured privacy policy. S
 
 ## Quick Start
 
-Install the prebuilt binary — no Rust toolchain required:
+Run it with no install — `npx` fetches the right prebuilt binary for your platform:
+
+```bash
+npx @ieranama/discomcp --help
+```
+
+Or install the binary once (no Rust toolchain required):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.sh | sh
