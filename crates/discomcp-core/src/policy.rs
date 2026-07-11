@@ -46,8 +46,13 @@ impl SafetyPolicy {
     }
 }
 
+// Unambiguous irreversible-data-loss verbs only. This is a backstop, not a
+// classifier: mutations that are not destructions (create/update/patch/move)
+// are left to the agent's declared classification by design. `empty`/`trash`
+// were added after finding gws `drive_files_emptyTrash` (permanent bulk delete)
+// dodges the plain delete/drop set.
 const DESTRUCTIVE_VERBS: &[&str] = &[
-    "delete", "drop", "purge", "wipe", "destroy", "remove", "truncate",
+    "delete", "drop", "purge", "wipe", "destroy", "remove", "truncate", "empty", "trash",
 ];
 
 /// Deterministic hard gate. `Some(reason)` => never auto-execute during
@@ -791,6 +796,42 @@ mod tests {
             assert!(
                 backstop_veto(&tool(name, "", json!({}))).is_none(),
                 "{name} must not be vetoed"
+            );
+        }
+    }
+
+    #[test]
+    fn backstop_audit_against_real_mcp_tool_names() {
+        // Real irreversible-data-loss tools observed on live MCP targets: the
+        // backstop must catch these even if a confused agent declares them reads.
+        let must_veto = [
+            "gmail_users_messages_delete",
+            "gmail_users_messages_batchDelete",
+            "gmail_users_threads_delete",
+            "drive_files_delete",
+            "drive_files_emptyTrash", // permanent bulk delete — dodges plain "delete"
+            "drive_revisions_delete",
+            "drive_permissions_delete",
+        ];
+        for name in must_veto {
+            assert!(
+                backstop_veto(&tool(name, "", json!({}))).is_some(),
+                "destructive tool {name} must be vetoed by the backstop"
+            );
+        }
+        // By design NOT vetoed: these are mutations/admin, not irreversible data
+        // loss. The agent classifies them; declaring them a read is what keeps
+        // them out, not the backstop. Documented here so the boundary is explicit.
+        let agent_classified = [
+            "calendar_events_move",                // reparent, not delete
+            "drive_permissions_update",            // admin mutation
+            "gmail_users_settings_updateVacation", // settings mutation
+            "harmonic_clear_saved_search_net_new", // resets a "seen" marker
+        ];
+        for name in agent_classified {
+            assert!(
+                backstop_veto(&tool(name, "", json!({}))).is_none(),
+                "{name} is agent-classified, not a backstop veto"
             );
         }
     }
