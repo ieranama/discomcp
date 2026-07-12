@@ -195,11 +195,12 @@ fn serve_stdio_drives_a_full_profiling_session() {
     );
     let rejected = &mutating["result"]["structuredContent"];
     assert_eq!(rejected["outcome"], "rejected");
-    assert!(rejected["reason"]
+    // Default-deny: `create_item` is a write-verb name, rejected before the call.
+    let reason = rejected["reason"]
         .as_str()
         .expect("reason string")
-        .to_ascii_lowercase()
-        .contains("risk"));
+        .to_ascii_lowercase();
+    assert!(reason.contains("default-deny") && reason.contains("mutation"));
 
     // 8. a destructive-named tool is backstopped even when the agent falsely
     // declares it a read.

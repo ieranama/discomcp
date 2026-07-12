@@ -1823,7 +1823,10 @@ mod tests {
             ))
             .await;
         assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
-        assert!(outcome.reason.to_ascii_lowercase().contains("risk"));
+        // Default-deny gate: a write-verb name (`create_item`) is rejected before
+        // the target call regardless of the agent's declaration.
+        let reason = outcome.reason.to_ascii_lowercase();
+        assert!(reason.contains("default-deny") && reason.contains("mutation"));
         assert!(outcome.observation.is_none());
         assert_eq!(session.runtime_budget.probes_executed, 0);
     }

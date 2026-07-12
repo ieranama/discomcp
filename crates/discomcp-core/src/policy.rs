@@ -118,6 +118,174 @@ fn name_segments(name: &str) -> Vec<String> {
     segments
 }
 
+// Closed, universal read-verb allowlist. A tool whose name's FIRST or LAST
+// segment is one of these is treated as provably read-only (see the default-deny
+// gate in `execute_safe_probe`). `query` is special: it only counts as a read
+// verb when the tool is NOT a query-executor (see `QUERY_ARG_KEYS`), because a
+// `*_query` executor's read-vs-write character lives in its argument, not name.
+// `resolve` is deliberately NOT here: it is a mutation verb for Drive access
+// proposals (`drive_accessproposals_resolve` approves/denies a proposal, changing
+// sharing permissions), and it carries no write verb in its name segments, so
+// including it would let the default-deny gate wave a real mutation through as
+// "provably read-only". Default-deny: an ambiguous verb is not a proof of read.
+const READ_VERBS: &[&str] = &[
+    "list", "get", "read", "search", "describe", "fetch", "show", "view", "lookup", "query",
+    "find", "count", "export", "download", "preview", "check", "stat", "head",
+];
+
+// Hard mutation-signal verbs. A tool whose name's FIRST or LAST segment is one of
+// these (or starts with `batch`) is rejected even if a read verb also appears — a
+// write verb OVERRIDES a coincidental read verb. The lone exception is a
+// query-executor proven read-only by its argument (path c), which is exactly what
+// tells `execute_sql` SELECT apart from `execute_sql` DROP.
+const WRITE_VERBS: &[&str] = &[
+    "create", "update", "insert", "delete", "remove", "drop", "purge", "wipe", "destroy",
+    "truncate", "empty", "trash", "move", "copy", "send", "post", "put", "patch", "write", "set",
+    "modify", "rename", "archive", "restore", "cancel", "revoke", "grant", "clear", "merge",
+    "import", "upload", "sync", "run", "execute", "trigger", "invoke",
+];
+
+// Argument keys that mark a query-executor tool. Searched case-insensitively at
+// any depth of the input schema and of the submitted arguments.
+const QUERY_ARG_KEYS: &[&str] = &[
+    "sql",
+    "query",
+    "statement",
+    "expression",
+    "cypher",
+    "gql",
+    "kql",
+];
+
+// A read-only statement must begin with one of these keywords.
+const READ_ONLY_QUERY_STARTERS: &[&str] = &[
+    "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "PRAGMA",
+];
+
+// ...and must contain NONE of these write/DDL/DML keywords as word-bounded tokens.
+const FORBIDDEN_QUERY_TOKENS: &[&str] = &[
+    "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE", "MERGE", "REPLACE",
+    "GRANT", "REVOKE", "CALL", "EXEC", "EXECUTE", "COPY", "LOAD", "IMPORT", "RENAME", "ATTACH",
+    "VACUUM", "SET", "RESET",
+];
+
+/// True when the tool name's FIRST or LAST `name_segments` segment satisfies `predicate`.
+fn name_first_or_last(name: &str, predicate: impl Fn(&str) -> bool) -> bool {
+    let segments = name_segments(name);
+    segments.first().is_some_and(|segment| predicate(segment))
+        || segments.last().is_some_and(|segment| predicate(segment))
+}
+
+fn is_write_verb(segment: &str) -> bool {
+    WRITE_VERBS.contains(&segment) || segment.starts_with("batch")
+}
+
+/// A hard mutation signal from the tool name alone (first/last segment).
+#[must_use]
+pub fn name_has_write_verb(name: &str) -> bool {
+    name_first_or_last(name, is_write_verb)
+}
+
+/// A positive read signal from the tool name alone (first/last segment). `query`
+/// is excluded when the tool is a query-executor — its safety is decided by the
+/// argument guard, not the name.
+#[must_use]
+pub fn name_has_read_verb(name: &str, is_query_executor: bool) -> bool {
+    name_first_or_last(name, |segment| {
+        READ_VERBS.contains(&segment) && !(segment == "query" && is_query_executor)
+    })
+}
+
+/// True when any object key (case-insensitive, at any depth) is a query-argument key.
+fn json_contains_query_key(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.keys().any(|key| {
+                QUERY_ARG_KEYS
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+            }) || map.values().any(json_contains_query_key)
+        }
+        Value::Array(items) => items.iter().any(json_contains_query_key),
+        _ => false,
+    }
+}
+
+/// True when the tool's input schema declares a query-executor argument.
+#[must_use]
+pub fn schema_declares_query_argument(schema: &Value) -> bool {
+    json_contains_query_key(schema)
+}
+
+/// The string value of the first query-argument key (case-insensitive, any depth).
+fn find_query_argument(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if QUERY_ARG_KEYS
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
+                    if let Some(text) = child.as_str() {
+                        return Some(text);
+                    }
+                }
+            }
+            map.values().find_map(find_query_argument)
+        }
+        Value::Array(items) => items.iter().find_map(find_query_argument),
+        _ => None,
+    }
+}
+
+/// A query-executor probe is a read ONLY IF its submitted SQL/query argument is a
+/// provably read-only statement.
+#[must_use]
+pub fn query_executor_arg_is_readonly(arguments: &Value) -> bool {
+    find_query_argument(arguments).is_some_and(is_read_only_query)
+}
+
+/// Conservative read-only classifier for a SQL-family statement. Fail-safe: any
+/// uncertainty returns `false` so the default-deny gate rejects it.
+#[must_use]
+pub fn is_read_only_query(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Multiple statements (a non-empty second statement after `;`) → reject.
+    if trimmed
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+        .count()
+        > 1
+    {
+        return false;
+    }
+    // The first meaningful keyword must be a read-only starter.
+    let first_keyword = trimmed
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .find(|word| !word.is_empty());
+    let Some(first_keyword) = first_keyword else {
+        return false;
+    };
+    if !READ_ONLY_QUERY_STARTERS.contains(&first_keyword.to_ascii_uppercase().as_str()) {
+        return false;
+    }
+    // No write/DDL/DML keyword may appear anywhere as a word-bounded token.
+    for token in
+        trimmed.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+    {
+        if token.is_empty() {
+            continue;
+        }
+        if FORBIDDEN_QUERY_TOKENS.contains(&token.to_ascii_uppercase().as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn validate_json_schema(schema: &Value, value: &Value) -> Result<(), String> {
     validate_schema_at(schema, value, "")
 }
@@ -278,10 +446,37 @@ pub async fn execute_safe_probe(request: SafeProbeRequest<'_>) -> ProbeExecution
         .get("readOnlyHint")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !read_only_hint && !policy.permits(&declared) {
+    // DEFAULT-DENY read gate. A probe executes ONLY IF it is provably read-only.
+    // The agent's declared classification is recorded as evidence but never
+    // authorizes execution on its own.
+    let is_query_executor = schema_declares_query_argument(&tool.raw.input_schema)
+        || find_query_argument(&decision.arguments).is_some();
+    let executor_arg_is_readonly = query_executor_arg_is_readonly(&decision.arguments);
+    // Hard mutation signal: a write-verb tool name rejects regardless of any
+    // coincidental read verb. The sole exception is a query-executor proven
+    // read-only by its argument — that is exactly the execute_sql SELECT vs DROP
+    // discriminator. (The destructiveHint / destructive-verb backstop above still
+    // wins over even a read-only argument.)
+    if name_has_write_verb(&tool.raw.name) && !executor_arg_is_readonly {
         return rejected(
             declared,
-            "declare this probe's risk as safe_read, constrained_read, or pure_computation (field `classification`); tools without readOnlyHint run only when you declare them read-class",
+            &format!(
+                "default-deny: tool `{name}` carries a write/mutation verb in its name, so it is not sent to the target; your `classification` is recorded as evidence but cannot authorize execution",
+                name = tool.raw.name
+            ),
+        );
+    }
+    let read_signal = read_only_hint
+        || name_has_read_verb(&tool.raw.name, is_query_executor)
+        || executor_arg_is_readonly
+        || (policy.allow_sensitive_reads && declared == RiskClass::SensitiveRead);
+    if !read_signal {
+        return rejected(
+            declared,
+            &format!(
+                "default-deny: DiscoMCP executes a probe only when it is provably read-only (a read-verb tool name, a server readOnlyHint, or a query-executor whose argument is a read-only statement); `{name}` matched no read signal. Your `classification` is recorded as evidence but does not authorize execution.",
+                name = tool.raw.name
+            ),
         );
     }
     let risk = declared;
@@ -1125,5 +1320,213 @@ mod tests {
         .await;
         assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
         assert!(client.calls().lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_read_verb_tools_execute_without_annotations_or_declaration() {
+        // No readOnlyHint, no declaration: the read-verb name is the only signal,
+        // exactly the gws case. First OR last segment being a read verb suffices.
+        for name in [
+            "list_records",
+            "get_company",
+            "drive_files_list",
+            "calendar_calendarList_list",
+        ] {
+            let raw_tool = tool(name, "", json!({"type": "object"}));
+            let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+            let client = client_for(raw_tool, json!({"ok": true}));
+            let result = execute(
+                &client,
+                &catalogue,
+                &declared_decision(name, json!({}), None),
+                &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+            )
+            .await;
+            assert_eq!(
+                result.runtime_decision.outcome,
+                RuntimeOutcome::Accepted,
+                "{name} should execute on its read-verb name"
+            );
+            assert_eq!(client.calls().lock().expect("lock").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn mutation_tools_are_rejected_even_when_declared_safe_read() {
+        // The sacred guarantee: a declaration of safe_read cannot force a mutation
+        // to execute. Some reject on a write-verb name; others (updateVacation,
+        // obliterate) on default-deny because no read verb sits first/last.
+        for name in [
+            "drive_files_update",
+            "gmail_users_messages_send",
+            "calendar_events_move",
+            "drive_permissions_create",
+            "gmail_users_settings_updateVacation",
+            "calendars_clear",
+            "cse_keypairs_obliterate",
+            "gmail_users_drafts_send",
+        ] {
+            let raw_tool = tool(name, "", json!({"type": "object"}));
+            let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+            let client = client_for(raw_tool, json!({"called": true}));
+            let result = execute(
+                &client,
+                &catalogue,
+                &declared_decision(name, json!({}), Some(RiskClass::SafeRead)),
+                &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+            )
+            .await;
+            assert_eq!(
+                result.runtime_decision.outcome,
+                RuntimeOutcome::Rejected,
+                "{name} must be rejected despite a safe_read declaration"
+            );
+            assert!(client.calls().lock().expect("lock").is_empty());
+        }
+    }
+
+    fn execute_sql_tool() -> RawTool {
+        tool(
+            "execute_sql",
+            "",
+            json!({
+                "type": "object",
+                "required": ["sql"],
+                "properties": {"sql": {"type": "string"}},
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn query_executor_runs_read_only_sql() {
+        for statement in [
+            "SELECT * FROM orders",
+            "WITH c AS (SELECT 1) SELECT * FROM c",
+        ] {
+            let raw_tool = execute_sql_tool();
+            let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+            let client = client_for(raw_tool, json!({"rows": []}));
+            let result = execute(
+                &client,
+                &catalogue,
+                &declared_decision("execute_sql", json!({"sql": statement}), None),
+                &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+            )
+            .await;
+            assert_eq!(
+                result.runtime_decision.outcome,
+                RuntimeOutcome::Accepted,
+                "read-only `{statement}` should execute via the argument guard"
+            );
+            assert_eq!(client.calls().lock().expect("lock").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_executor_rejects_write_sql_and_multi_statements() {
+        for statement in [
+            "DROP TABLE orders",
+            "DELETE FROM orders",
+            "UPDATE orders SET total = 0",
+            "INSERT INTO orders VALUES (1)",
+            "TRUNCATE TABLE orders",
+            "GRANT SELECT ON orders TO analyst",
+            "SELECT 1; DROP TABLE orders",
+        ] {
+            let raw_tool = execute_sql_tool();
+            let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+            let client = client_for(raw_tool, json!({"rows": []}));
+            let result = execute(
+                &client,
+                &catalogue,
+                &declared_decision("execute_sql", json!({"sql": statement}), None),
+                &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+            )
+            .await;
+            assert_eq!(
+                result.runtime_decision.outcome,
+                RuntimeOutcome::Rejected,
+                "write statement `{statement}` must be rejected before the target call"
+            );
+            assert!(client.calls().lock().expect("lock").is_empty());
+        }
+    }
+
+    #[test]
+    fn is_read_only_query_classifies_statements() {
+        for read_only in [
+            "SELECT 1",
+            "select * from t",
+            "  SELECT a FROM b  ",
+            "WITH c AS (SELECT 1) SELECT * FROM c",
+            "SHOW TABLES",
+            "DESCRIBE orders",
+            "EXPLAIN SELECT 1",
+            "PRAGMA table_info(orders)",
+            "SELECT 1;",
+        ] {
+            assert!(
+                is_read_only_query(read_only),
+                "`{read_only}` should be read-only"
+            );
+        }
+        for write in [
+            "",
+            "   ",
+            "DROP TABLE t",
+            "DELETE FROM t",
+            "UPDATE t SET x = 1",
+            "INSERT INTO t VALUES (1)",
+            "TRUNCATE TABLE t",
+            "CREATE TABLE t (id INT)",
+            "MERGE INTO t USING s ON t.id = s.id",
+            "GRANT SELECT ON t TO u",
+            "SELECT 1; DROP TABLE t",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert!(
+                !is_read_only_query(write),
+                "`{write}` must not be read-only"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn declaration_cannot_force_execution_of_a_non_read_tool() {
+        // A tool with no read-verb name, no readOnlyHint, and no query argument is
+        // rejected no matter what the agent declares — declaration is advisory.
+        for declared in [RiskClass::Mutation, RiskClass::SafeRead] {
+            let raw_tool = tool("inbox", "", json!({"type": "object"}));
+            let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+            let client = client_for(raw_tool, json!({"called": true}));
+            let result = execute(
+                &client,
+                &catalogue,
+                &declared_decision("inbox", json!({}), Some(declared)),
+                &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+            )
+            .await;
+            assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
+            assert!(client.calls().lock().expect("lock").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn read_verb_tool_runs_regardless_of_declared_mutation() {
+        // Declaration is evidence, not a veto: a genuine read-verb tool still runs
+        // even when the agent mislabels it a mutation.
+        let raw_tool = tool("get_company", "", json!({"type": "object"}));
+        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
+        let client = client_for(raw_tool, json!({"ok": true}));
+        let result = execute(
+            &client,
+            &catalogue,
+            &declared_decision("get_company", json!({}), Some(RiskClass::Mutation)),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Accepted);
+        assert_eq!(result.risk, RiskClass::Mutation);
     }
 }

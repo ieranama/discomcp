@@ -29,8 +29,13 @@ server_instructions (the MCP's own usage guidance) and documentation_urls. BEFOR
 the docs so you explore grounded, not blind: read server_instructions, fetch any documentation_urls, \
 and if the target has public official docs (e.g. the vendor's docs site), fetch and read those too \
 with your own web tools. Then YOU classify each tool's risk from its card; DiscoMCP does not guess. (4) execute_probe in a loop, \
-declaring your `classification` on every probe (only safe_read/constrained_read/pure_computation \
-run; readOnlyHint-annotated tools also run). Each result carries a `gaps` report \
+declaring your `classification` on every probe as ADVISORY evidence (it is recorded in the profile \
+but never authorizes execution). DiscoMCP applies a DEFAULT-DENY read gate: a probe runs ONLY IF it is \
+provably read-only — the tool name's first or last segment is a read verb \
+(list/get/read/search/describe/fetch/show/view/lookup/find/count/export/download/preview/check/stat/head/query), \
+OR the server annotates readOnlyHint=true, OR the tool is a query-executor whose sql/query argument is a \
+read-only statement (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/PRAGMA with no write or DDL keywords). Any write-verb \
+tool name or the destructive backstop rejects the probe regardless of what you declare. Each result carries a `gaps` report \
 (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal) — \
 let the gaps drive the next probe: traverse an untraversed_identifier with its cited provenance, \
 run an unexecuted_tool you judge read-safe, or use a sampling_hint param (orderBy/pageSize/q/filter) \
@@ -354,7 +359,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "execute_probe",
-            "description": "Validate and, if permitted, execute ONE tool call against the target. You must declare your risk `classification` for the tool; only read classes run. DiscoMCP hard-blocks only tools the server marks destructiveHint or whose name contains a destructive verb (delete/drop/purge/wipe/destroy/remove/truncate), and enforces JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation), sampling limits, and the probe budget. Returns a redacted observation or the rejection reason. Every result includes a `gaps` report (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal).",
+            "description": "Validate and, if permitted, execute ONE tool call against the target. DEFAULT-DENY: a probe runs ONLY IF it is provably read-only — a read-verb tool name (list/get/read/search/...), a server readOnlyHint, or a query-executor whose sql/query argument is a read-only statement (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/PRAGMA). A write-verb tool name or the destructive backstop (server destructiveHint or destructive-verb name) rejects regardless of your declaration. Your `classification` is REQUIRED but ADVISORY — recorded as evidence, it never authorizes execution. Also enforces JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation), sampling limits, and the probe budget. Returns a redacted observation or the rejection reason. Every result includes a `gaps` report (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal).",
             "inputSchema": {
                 "type": "object",
                 "required": ["target", "tool", "arguments", "classification"],
@@ -364,7 +369,7 @@ fn tool_definitions() -> Value {
                     "arguments": {"type": "object", "description": "Arguments for the target tool call."},
                     "classification": {"type": "string",
                         "enum": ["safe_read","constrained_read","sensitive_read","pure_computation","mutation","external_side_effect","destructive","administrative","arbitrary_execution"],
-                        "description": "YOUR risk classification of this tool, judged from its name, description, input_schema and annotations. Only safe_read/constrained_read/pure_computation execute (readOnlyHint-annotated tools also execute). Recorded as agent-attributed evidence in the profile."},
+                        "description": "YOUR risk classification of this tool, judged from its name, description, input_schema and annotations. ADVISORY evidence only: recorded as agent-attributed evidence in the profile, it does NOT authorize execution. DiscoMCP runs a probe only when it is provably read-only (read-verb tool name, server readOnlyHint, or a query-executor with a read-only sql/query argument); write-verb names and the destructive backstop are rejected regardless of what you declare."},
                     "provenance": {
                         "type": "array",
                         "description": "Origin of each argument. REQUIRED for any identifier argument (id, *_id, *-id, *Id, *_uri, contains 'identifier'). Use kind \"observed\" citing the probe the identifier came from. Use \"user_defined\" ONLY for an identifier the human user explicitly supplied — never for values you invented; it is recorded as user-attributed evidence.",
