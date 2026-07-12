@@ -735,6 +735,10 @@ pub struct SamplingHint {
     pub tool: String,
     /// Matched schema param names, e.g. `["orderBy","pageSize"]`.
     pub params: Vec<String>,
+    /// Subset of `params` that sort by recency — prefer these to sample the
+    /// user's current work (file/document/record stores) over blind first-N.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recency_params: Vec<String>,
 }
 
 /// Pure coverage counts. Never a verdict.
@@ -910,6 +914,9 @@ const SAMPLING_PARAM_HINTS: &[&str] = &[
     "sort",
     "modifiedtime",
     "updated",
+    "createdtime",
+    "created",
+    "lastmodified",
     "pagesize",
     "pagetoken",
     "limit",
@@ -917,6 +924,19 @@ const SAMPLING_PARAM_HINTS: &[&str] = &[
     "q",
     "query",
     "filter",
+];
+
+/// Params that let a tool sample the MOST RECENT items. For file/document/record
+/// stores the recent surface reveals the user's current work, so these are worth
+/// preferring over blind first-N.
+const RECENCY_PARAM_HINTS: &[&str] = &[
+    "orderby",
+    "sort",
+    "modifiedtime",
+    "updated",
+    "createdtime",
+    "created",
+    "lastmodified",
 ];
 
 /// Computes a read-only [`GapReport`] from resident session state. No target
@@ -1045,9 +1065,15 @@ fn compute_gaps(
             if params.is_empty() {
                 None
             } else {
+                let recency_params = params
+                    .iter()
+                    .filter(|key| RECENCY_PARAM_HINTS.contains(&normalize_param(key).as_str()))
+                    .cloned()
+                    .collect();
                 Some(SamplingHint {
                     tool: tool.raw.name.clone(),
                     params,
+                    recency_params,
                 })
             }
         })

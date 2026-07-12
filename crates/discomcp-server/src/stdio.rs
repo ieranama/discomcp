@@ -39,7 +39,10 @@ tool name or the destructive backstop rejects the probe regardless of what you d
 (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal) — \
 let the gaps drive the next probe: traverse an untraversed_identifier with its cited provenance, \
 run an unexecuted_tool you judge read-safe, or use a sampling_hint param (orderBy/pageSize/q/filter) \
-to sample most-recent instead of blind first-N; call session_status anytime for the same report \
+to sample smartly instead of blind first-N. For file/document/record stores (Drive, SharePoint, \
+CRMs) DEFAULT TO THE MOST RECENT items — a sampling_hint's recency_params (modifiedTime/updated/ \
+orderBy desc) reveal what the user is actively working on; a store can hold thousands of items, so \
+profile the active surface, not the archive. Call session_status anytime for the same report \
 without spending a probe. DiscoMCP enforces only a deterministic backstop (server destructiveHint, \
 destructive-verb tool names, never executing a tool you did not explicitly submit) plus JSON-schema \
 validation, identifier provenance, sampling limits, response-size caps, secret redaction, and the \
