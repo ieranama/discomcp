@@ -325,66 +325,76 @@ fn render_skill(profile: &TargetProfile) -> String {
     }
     output.push_str("## When To Use This MCP\n\n");
     output.push_str("Use it for intents supported by the observed structures and declared tools below. Do not assume unavailable structures, fields, identifiers, or relationships.\n\n");
-    output.push_str("## What The MCP Exposes\n\n");
-    output.push_str(&format!(
-        "`declared`: {} tool(s), {} resource(s), and {} prompt(s) were cached during static discovery.\n\n",
-        profile.catalogue.tools.len(),
-        profile.catalogue.resources.len(),
-        profile.catalogue.prompts.len()
-    ));
-    output.push_str("## Functional Capability Profile\n\n");
-    for (name, capability) in &profile.capability_profile.dimensions {
-        output.push_str(&format!(
-            "- `{name}`: `{}` - {}\n",
-            evidence_label(&capability.claim.status),
-            if capability.enabled {
-                "supported by declared evidence"
-            } else {
-                "not established"
-            }
-        ));
+    // Only surface capabilities actually established — "not established" lines are
+    // constant filler the agent gains nothing from.
+    let established: Vec<_> = profile
+        .capability_profile
+        .dimensions
+        .iter()
+        .filter(|(_, capability)| capability.enabled)
+        .collect();
+    if !established.is_empty() {
+        output.push_str("## Functional Capability Profile\n\n");
+        for (name, capability) in established {
+            output.push_str(&format!(
+                "- `{name}`: `{}` - supported by declared evidence\n",
+                evidence_label(&capability.claim.status),
+            ));
+        }
+        output.push('\n');
     }
-    output.push_str("\n## Observed Workspace Structures\n\n");
+    output.push_str("## Observed Workspace Structures\n\n");
     if profile.workspace_model.structures.is_empty() {
         output.push_str("`unknown`: No workspace structures were safely observed.\n");
     }
     for structure in &profile.workspace_model.structures {
         output.push_str(&format!(
-            "- `{}`: `{}` ({:.2}) from {}.\n",
+            "- `{}`: `{}` ({:.2})\n",
             structure.declared_name,
             evidence_label(&structure.evidence.status),
             structure.evidence.confidence,
-            structure
-                .source_tools
-                .iter()
-                .map(|tool| format!("`{tool}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
         ));
     }
-    output.push_str("\n## Important Fields And Identifiers\n\n");
-    for structure in &profile.workspace_model.structures {
-        let fields = structure
-            .fields
-            .iter()
-            .map(|field| {
-                if field.is_identifier {
-                    format!(
-                        "`{}` (identifier candidate, {})",
-                        field.name,
-                        evidence_label(&field.evidence.status)
-                    )
-                } else {
-                    format!("`{}` ({})", field.name, field.type_summary)
-                }
-            })
-            .collect::<Vec<_>>();
-        if !fields.is_empty() {
-            output.push_str(&format!(
-                "- `{}`: {}\n",
+    // Carry only the identifier fields — the ones that enable a hop. Full field
+    // schemas come back live in each tool's own response, so dumping every
+    // leaf's type here is redundant weight re-read on every turn. If the profile
+    // flagged no identifier fields, omit the section entirely — the hop keys
+    // still live in the narrative, the tool sequences, and Confirmed Relationships.
+    let identifier_rows: Vec<String> = profile
+        .workspace_model
+        .structures
+        .iter()
+        .filter_map(|structure| {
+            let ids = structure
+                .fields
+                .iter()
+                .filter(|field| field.is_identifier)
+                .map(|field| {
+                    format!("`{}` ({})", field.name, evidence_label(&field.evidence.status))
+                })
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return None;
+            }
+            let other = structure.fields.len() - ids.len();
+            let suffix = if other > 0 {
+                format!(" (+{other} non-identifier field(s), schema live from tool)")
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "- `{}`: {}{}\n",
                 structure.declared_name,
-                fields.join(", ")
-            ));
+                ids.join(", "),
+                suffix
+            ))
+        })
+        .collect();
+    if !identifier_rows.is_empty() {
+        output.push_str("\n## Identifiers That Enable Hops\n\n");
+        output.push_str("`observed`: Read these out of a prior response; never invent them. Full field schemas come live from each tool's own response.\n");
+        for row in identifier_rows {
+            output.push_str(&row);
         }
     }
     output.push_str("\n## Confirmed Relationships\n\n");
@@ -409,20 +419,26 @@ fn render_skill(profile: &TargetProfile) -> String {
     {
         output.push_str("`unknown`: No relationship was directly verified by a traversal probe.\n");
     }
-    output.push_str("\n## Inferred Relationships\n\n");
-    for relationship in profile
+    // Only inferred edges that name a real join field carry information. A blank
+    // `via` is just the json-pointer parent/child the agent reconstructs for free.
+    let inferred: Vec<_> = profile
         .workspace_model
         .relationships
         .iter()
         .filter(|relationship| relationship.evidence.status == EvidenceStatus::Inferred)
-    {
-        output.push_str(&format!(
-            "- `{}` -> `{}` via {}: `inferred` ({:.2}).\n",
-            relationship.from_structure,
-            relationship.to_structure,
-            relationship.via_fields.join(", "),
-            relationship.evidence.confidence
-        ));
+        .filter(|relationship| relationship.via_fields.iter().any(|field| !field.is_empty()))
+        .collect();
+    if !inferred.is_empty() {
+        output.push_str("\n## Inferred Relationships\n\n");
+        for relationship in inferred {
+            output.push_str(&format!(
+                "- `{}` -> `{}` via {}: `inferred` ({:.2}).\n",
+                relationship.from_structure,
+                relationship.to_structure,
+                relationship.via_fields.join(", "),
+                relationship.evidence.confidence
+            ));
+        }
     }
     output.push_str("\n## Tool Safety Classes\n\n");
     for (heading, risks) in [
@@ -437,44 +453,41 @@ fn render_skill(profile: &TargetProfile) -> String {
         ),
         ("Unclassified", vec!["unknown"]),
     ] {
-        output.push_str(&format!("### {heading}\n\n"));
         let tools = profile
             .catalogue
             .tools
             .iter()
             .filter(|tool| risks.contains(&risk_label(&tool.card.risk)))
             .collect::<Vec<_>>();
+        // Omit empty risk classes entirely — a printed "None were established"
+        // is constant filler re-read on every turn.
         if tools.is_empty() {
-            output.push_str("`unknown`: None were established from the current catalogue.\n\n");
-        } else {
-            for tool in tools {
-                output.push_str(&format!(
-                    "- `{}`: `{}`; {}{}\n",
-                    tool.raw.name,
-                    risk_evidence_label(&tool.card),
-                    tool.card.summary,
-                    if heading == "Unclassified" {
-                        " — not probed or classified during profiling"
-                    } else {
-                        ""
-                    }
-                ));
-            }
-            output.push('\n');
+            continue;
         }
+        output.push_str(&format!("### {heading}\n\n"));
+        for tool in tools {
+            output.push_str(&format!(
+                "- `{}`: `{}`; {}{}\n",
+                tool.raw.name,
+                risk_evidence_label(&tool.card),
+                tool.card.summary,
+                if heading == "Unclassified" {
+                    " — not probed or classified during profiling"
+                } else {
+                    ""
+                }
+            ));
+        }
+        output.push('\n');
     }
-    output.push_str("### Declared But Unverified\n\n");
     let unverified = profile
         .catalogue
         .tools
         .iter()
         .filter(|tool| tool.card.risk_evidence == "agent_declared_unverified")
         .collect::<Vec<_>>();
-    if unverified.is_empty() {
-        output.push_str(
-            "`unknown`: No tool carried an agent classification without a successful probe.\n\n",
-        );
-    } else {
+    if !unverified.is_empty() {
+        output.push_str("### Declared But Unverified\n\n");
         for tool in unverified {
             output.push_str(&format!(
                 "- `{}`: the agent declared a class but no read probe was accepted — treat as UNVERIFIED, not confirmed safe.\n",
@@ -511,19 +524,15 @@ fn render_skill(profile: &TargetProfile) -> String {
     output.push_str("`declared`: After an explicitly confirmed state-changing operation, use a safe read tool to verify the intended result when one exists.\n\n");
     output.push_str("## Failure And Fallback Behavior\n\n");
     output.push_str("`declared`: If a safe probe fails, retain the uncertainty, do not retry risky tools, and use only another validated safe probe.\n\n");
-    output.push_str("## Known Contradictions\n\n");
-    if profile.workspace_model.contradictions.is_empty() {
-        output.push_str("`unknown`: No contradictions were recorded in this profile run.\n\n");
-    } else {
+    if !profile.workspace_model.contradictions.is_empty() {
+        output.push_str("## Known Contradictions\n\n");
         for contradiction in &profile.workspace_model.contradictions {
             output.push_str(&format!("- `contradicted`: {}\n", contradiction.claim));
         }
         output.push('\n');
     }
-    output.push_str("## Known Uncertainties\n\n");
-    if profile.workspace_model.uncertainties.is_empty() {
-        output.push_str("`unknown`: No material uncertainty was recorded.\n\n");
-    } else {
+    if !profile.workspace_model.uncertainties.is_empty() {
+        output.push_str("## Known Uncertainties\n\n");
         for uncertainty in &profile.workspace_model.uncertainties {
             output.push_str(&format!(
                 "- `unknown`: {} ({})\n",
@@ -557,13 +566,6 @@ fn render_skill(profile: &TargetProfile) -> String {
     } else {
         output.push_str("`unknown`: No safe end-to-end example was established.\n\n");
     }
-    output.push_str("## Questions That Improve The Skill\n\n");
-    output.push_str(
-        "- `user_defined`: Which observed structure is the source of truth for your workflow?\n",
-    );
-    output.push_str(
-        "- `user_defined`: Which planned actions should always require confirmation?\n\n",
-    );
     output.push_str("## Refreshing This Skill In The Background\n\n");
     output.push_str(
         "`user_defined`: This skill was built by a DiscoMCP profiling session. If `lookup_target` \
