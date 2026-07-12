@@ -518,6 +518,7 @@ impl DiscoMcp {
             }
         }
 
+        let has_accepted_observations = !observations.is_empty();
         let profile = assemble_profile(
             target_id,
             discovery,
@@ -529,6 +530,9 @@ impl DiscoMcp {
             &options,
         );
         write_profile_artifacts(&profile, &output_dir)?;
+        if !has_accepted_observations {
+            crate::artifacts::write_stub_skill(&output_dir, target_id)?;
+        }
         info!(
             target = target_id,
             output = %output_dir.display(),
@@ -866,6 +870,12 @@ impl ProfilingSession {
             let Some(tool_name) = record.decision.selected_tool.as_deref() else {
                 continue;
             };
+            // Round-blocker #2: a declared class is only FOLDED INTO `card.risk`
+            // when the probe was actually Accepted (a successful read observation).
+            // A rejected/failed probe whose agent declared "safe_read" must NEVER
+            // read as a confirmed Safe Read — its declaration is recorded as
+            // unverified evidence in a separate bucket instead.
+            let accepted = record.runtime_decision.outcome == RuntimeOutcome::Accepted;
             if let Some(tool) = self
                 .catalogue
                 .tools
@@ -877,10 +887,21 @@ impl ProfilingSession {
                 {
                     continue;
                 }
-                tool.card.risk = record.risk.clone();
-                tool.card.risk_evidence = "agent_declared".to_string();
+                if accepted {
+                    tool.card.risk = record.risk.clone();
+                    tool.card.risk_evidence = "agent_declared".to_string();
+                } else if tool.card.risk_evidence.is_empty()
+                    || tool.card.risk_evidence == "unclassified"
+                {
+                    tool.card.risk_evidence = "agent_declared_unverified".to_string();
+                }
             }
         }
+        // Hollow-profile guard: `observations` only ever holds ACCEPTED
+        // observations, so an empty vec means zero grounded reads. Write a stub
+        // SKILL that plainly states nothing was safely observed instead of a
+        // rich-looking profile masquerading over a bare catalogue.
+        let has_accepted_observations = !self.observations.is_empty();
         let mut profile = assemble_profile(
             &self.target_id,
             self.discovery,
@@ -893,6 +914,9 @@ impl ProfilingSession {
         );
         profile.metadata.usage_summary = usage_summary;
         write_profile_artifacts(&profile, &self.output_dir)?;
+        if !has_accepted_observations {
+            crate::artifacts::write_stub_skill(&self.output_dir, &self.target_id)?;
+        }
         info!(
             target = self.target_id,
             output = %self.output_dir.display(),
@@ -1872,7 +1896,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_rejects_an_identifier_without_provenance() {
+    async fn session_no_longer_rejects_a_missing_provenance_identifier() {
+        // Provenance is no longer a hard gate: an argument WITHOUT declared
+        // provenance is no longer rejected on a name heuristic. The probe
+        // proceeds (the anti-fabrication check only fires on a declared source).
         let app = session_app(MockMcpClient::collection_fixture());
         let mut session = app
             .start_session("mock-collection", ProfileOptions::default())
@@ -1884,8 +1911,144 @@ mod tests {
                 json!({"collection_id": "projects"}),
             ))
             .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_a_fabricated_observed_provenance() {
+        // The RETAINED truth check: a declared `Observed` source citing a value
+        // that was never captured is fabrication and is still rejected.
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let mut probe = session_probe("describe_collection", json!({"collection_id": "projects"}));
+        probe.argument_provenance = vec![crate::model::ArgumentProvenance {
+            json_pointer: "/collection_id".to_string(),
+            source: ArgumentSource::Observed {
+                observation_id: "probe-404".to_string(),
+                json_pointer: "/collections/0/id".to_string(),
+            },
+        }];
+        let outcome = session.execute_probe(probe).await;
         assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
-        assert!(outcome.reason.contains("provenance"));
+        assert!(outcome.reason.contains("invented") || outcome.reason.contains("captured"));
+    }
+
+    #[tokio::test]
+    async fn rejected_declared_read_is_not_confirmed_safe() {
+        // Round-blocker #2: an agent declaring a write-verb tool `safe_read` and
+        // getting REJECTED must never surface as a confirmed Safe Read.
+        let output = session_output("rejected-declared");
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session(
+                "mock-collection",
+                ProfileOptions {
+                    output_dir: Some(output.clone()),
+                    ..ProfileOptions::default()
+                },
+            )
+            .await
+            .expect("session should start");
+        let mut probe = session_probe(
+            "create_item",
+            json!({"collection_id": "projects", "fields": {}}),
+        );
+        probe.declared_risk = Some(RiskClass::SafeRead);
+        let outcome = session.execute_probe(probe).await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        // Give the session an accepted observation too, so finalize writes a rich
+        // profile (not the stub) and we can inspect the tool buckets.
+        let mut read = session_probe("list_collections", json!({}));
+        read.declared_risk = Some(RiskClass::ConstrainedRead);
+        assert_eq!(
+            session.execute_probe(read).await.outcome,
+            RuntimeOutcome::Accepted
+        );
+        let result = session.finalize(None).expect("finalize writes artifacts");
+        let card = result
+            .profile
+            .catalogue
+            .tools
+            .iter()
+            .find(|tool| tool.raw.name == "create_item")
+            .map(|tool| &tool.card)
+            .expect("card");
+        assert_ne!(card.risk, RiskClass::SafeRead);
+        assert_eq!(card.risk_evidence, "agent_declared_unverified");
+        let skill = fs::read_to_string(output.join("SKILL.md")).expect("read SKILL.md");
+        assert!(skill.contains("### Declared But Unverified"));
+        assert!(skill.contains("- `create_item`: the agent declared a class"));
+        // It must NOT be listed under the confirmed Safe Read bucket.
+        let safe_section = skill
+            .split("### Safe Read Tools")
+            .nth(1)
+            .and_then(|rest| rest.split("###").next())
+            .unwrap_or("");
+        assert!(!safe_section.contains("create_item"));
+        let _ = fs::remove_dir_all(output);
+    }
+
+    #[tokio::test]
+    async fn execute_probe_observation_exposes_non_id_scalar_candidates() {
+        // The agent surface: the serialized observation must carry non-id leaf
+        // candidates by pointer, each tagged with `from_tool`, so the agent can
+        // author names/enums/identifiers without a join back to the shape.
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session("mock-collection", ProfileOptions::default())
+            .await
+            .expect("session should start");
+        let mut probe = session_probe("list_collections", json!({}));
+        probe.declared_risk = Some(RiskClass::ConstrainedRead);
+        let outcome = session.execute_probe(probe).await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Accepted);
+        let payload = serde_json::to_value(&outcome).expect("serialize outcome");
+        let identifiers = payload["observation"]["identifiers"]
+            .as_array()
+            .expect("identifiers array");
+        // `name`/`description` are NON-id leaves that must now appear as candidates.
+        let name_candidate = identifiers
+            .iter()
+            .find(|candidate| candidate["json_pointer"] == "/collections/0/name")
+            .expect("non-id `name` leaf must be a candidate");
+        assert_eq!(name_candidate["from_tool"], "list_collections");
+        assert_eq!(name_candidate["value"], "Projects");
+    }
+
+    #[tokio::test]
+    async fn zero_accepted_probes_yields_insufficient_not_rich_profile() {
+        // A catalogue-only session (every probe rejected) must NOT emit a populated
+        // Tool-Safety / Recommended-Sequences SKILL — only an explicit stub.
+        let output = session_output("insufficient");
+        let app = session_app(MockMcpClient::collection_fixture());
+        let mut session = app
+            .start_session(
+                "mock-collection",
+                ProfileOptions {
+                    output_dir: Some(output.clone()),
+                    ..ProfileOptions::default()
+                },
+            )
+            .await
+            .expect("session should start");
+        // A mutation probe is rejected: zero accepted observations result.
+        let outcome = session
+            .execute_probe(session_probe(
+                "create_item",
+                json!({"collection_id": "projects", "fields": {}}),
+            ))
+            .await;
+        assert_eq!(outcome.outcome, RuntimeOutcome::Rejected);
+        let result = session.finalize(None).expect("finalize writes a stub");
+        assert!(result.profile.observations.is_empty());
+        let skill = fs::read_to_string(output.join("SKILL.md")).expect("read SKILL.md");
+        assert!(skill.contains("## Insufficient Observations"));
+        assert!(!skill.contains("## Tool Safety Classes"));
+        assert!(!skill.contains("## Recommended Tool Sequences"));
+        let _ = fs::remove_dir_all(output);
     }
 
     #[tokio::test]
@@ -2266,6 +2429,33 @@ mod tests {
             },
             ..ProbeRecord::default()
         }
+    }
+
+    #[test]
+    fn gaps_surface_non_id_scalar_candidates() {
+        // After the fact-walk de-gate, `untraversed_identifiers` (which reads
+        // `observation.identifiers` unfiltered) surfaces NON-id leaves too — a
+        // `state`/`date` the agent may want as the next probe argument.
+        let observation = crate::normalization::normalize_observation(
+            "obs-1".to_string(),
+            "list".to_string(),
+            json!({}),
+            &json!({"items": [{"id": "a", "state": "open", "updated": "2026-01-01"}]}),
+            &crate::model::ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Standard),
+        );
+        let cat = gap_catalogue(vec![]);
+        let gaps = compute_gaps(&cat, &[observation], &[], 10, 0);
+        assert!(
+            gaps.untraversed_identifiers
+                .iter()
+                .any(|candidate| candidate.name == "state" && candidate.value == "open"),
+            "non-id `state` leaf must surface as a candidate: {:?}",
+            gaps.untraversed_identifiers
+        );
+        assert!(gaps
+            .untraversed_identifiers
+            .iter()
+            .any(|candidate| candidate.name == "updated"));
     }
 
     #[test]

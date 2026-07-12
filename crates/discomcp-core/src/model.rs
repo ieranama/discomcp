@@ -467,6 +467,10 @@ pub struct ObservedIdentifier {
     pub value: String,
     pub observation_id: String,
     pub json_pointer: String,
+    /// Tool that produced this identifier, so the agent surface can render a
+    /// scalar candidate without joining back to the observation.
+    #[serde(default)]
+    pub from_tool: String,
     pub evidence: EvidenceClaim,
 }
 

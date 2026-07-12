@@ -45,14 +45,20 @@ orderBy desc) reveal what the user is actively working on; a store can hold thou
 profile the active surface, not the archive. Call session_status anytime for the same report \
 without spending a probe. DiscoMCP enforces only a deterministic backstop (server destructiveHint, \
 destructive-verb tool names, never executing a tool you did not explicitly submit) plus JSON-schema \
-validation, identifier provenance, sampling limits, response-size caps, secret redaction, and the \
+validation, anti-fabrication provenance (an argument that DECLARES an observed source must cite a \
+value actually captured — only that is rejected), response-size caps, secret redaction, and the \
 probe budget. Risk judgement is yours; your declarations are recorded as agent-attributed evidence \
-in the profile. STOP when the gaps are sufficiently closed (unexecuted_tools and \
-untraversed_identifiers near empty, or depth_signal.probes_executed approaching probe_budget) — \
-DiscoMCP reports, you decide; the only hard stop is the \"MCP probe budget is exhausted\" rejection. \
-(5) finalize_profile to synthesize and write the workspace model, operational model and SKILL.md, \
-then report the returned skill_path back to the user. generate_skill regenerates SKILL.md from an \
-existing profile directory.";
+in the profile. Each accepted observation surfaces EVERY short leaf scalar as a candidate \
+(json_pointer, value, from_tool) plus shapes-by-pointer — YOU author the entity names, pick the true \
+identifiers, name the enums from a field's distinct values, and describe relationships (Rust emits \
+unnamed shapes and observed containment/provenance edges only). STOP when the gaps are sufficiently \
+closed (unexecuted_tools and untraversed_identifiers near empty, or depth_signal.probes_executed \
+approaching probe_budget) — DiscoMCP reports, you decide; the only hard stop is the \"MCP probe budget \
+is exhausted\" rejection. (5) finalize_profile to synthesize and write the workspace model, \
+operational model and SKILL.md: VERIFY every claim against the captured observations before finalize \
+— never assert an unobserved fact, and mark authored/inferred claims distinctly from probe-observed \
+ones. Then report the returned skill_path back to the user. generate_skill regenerates SKILL.md from \
+an existing profile directory.";
 
 /// Runs the blocking JSON-RPC loop until stdin EOF.
 pub fn run(core: DiscoMcp) -> Result<()> {
@@ -362,7 +368,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "execute_probe",
-            "description": "Validate and, if permitted, execute ONE tool call against the target. DEFAULT-DENY: a probe runs ONLY IF it is provably read-only — a read-verb tool name (list/get/read/search/...), a server readOnlyHint, or a query-executor whose sql/query argument is a read-only statement (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/PRAGMA). A write-verb tool name or the destructive backstop (server destructiveHint or destructive-verb name) rejects regardless of your declaration. Your `classification` is REQUIRED but ADVISORY — recorded as evidence, it never authorizes execution. Also enforces JSON-schema validation, identifier provenance (identifiers may not be invented — cite the observation), sampling limits, and the probe budget. Returns a redacted observation or the rejection reason. Every result includes a `gaps` report (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal).",
+            "description": "Validate and, if permitted, execute ONE tool call against the target. DEFAULT-DENY: a probe runs ONLY IF it is provably read-only — a read-verb tool name (list/get/read/search/...), a server readOnlyHint, or a query-executor whose sql/query argument is a read-only statement (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/PRAGMA). A write-verb tool name or the destructive backstop (server destructiveHint or destructive-verb name) rejects regardless of your declaration. Your `classification` is REQUIRED but ADVISORY — recorded as evidence, it never authorizes execution. Also enforces JSON-schema validation, anti-fabrication provenance (an argument that DECLARES an observed source must cite a value actually captured — otherwise rejected; providing provenance is optional but citing a non-existent observation is fabrication), and the probe budget. Returns a redacted observation or the rejection reason. The observation's `identifiers` list EVERY short leaf scalar as a candidate (name, value, json_pointer, from_tool) — your raw material to author entity names, identifiers, enums (from distinct values), and relationships. Every result includes a `gaps` report (unsampled_structures, unexecuted_tools, untraversed_identifiers, sampling_hints, depth_signal).",
             "inputSchema": {
                 "type": "object",
                 "required": ["target", "tool", "arguments", "classification"],
@@ -375,7 +381,7 @@ fn tool_definitions() -> Value {
                         "description": "YOUR risk classification of this tool, judged from its name, description, input_schema and annotations. ADVISORY evidence only: recorded as agent-attributed evidence in the profile, it does NOT authorize execution. DiscoMCP runs a probe only when it is provably read-only (read-verb tool name, server readOnlyHint, or a query-executor with a read-only sql/query argument); write-verb names and the destructive backstop are rejected regardless of what you declare."},
                     "provenance": {
                         "type": "array",
-                        "description": "Origin of each argument. REQUIRED for any identifier argument (id, *_id, *-id, *Id, *_uri, contains 'identifier'). Use kind \"observed\" citing the probe the identifier came from. Use \"user_defined\" ONLY for an identifier the human user explicitly supplied — never for values you invented; it is recorded as user-attributed evidence.",
+                        "description": "Origin of each argument. Provide it for any identifier you took from a prior response: use kind \"observed\" citing the exact probe and pointer the value came from — DiscoMCP verifies that citation exists and rejects a fabricated one. Use \"user_defined\" ONLY for a value the human user explicitly supplied. Omitting provenance no longer rejects a probe, but never invent an identifier and claim it was observed.",
                         "items": {
                             "type": "object",
                             "required": ["json_pointer", "source"],
@@ -400,7 +406,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "finalize_profile",
-            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. Pass `usage_summary`: YOUR narrative of how THIS user actually uses this source, reasoned from what you observed (their saved searches, folders, tracked entities, recurring queries) — not a generic capability list. This becomes the skill's 'How You Use This MCP' section and is the whole point: the skill must let an agent exploit the MCP the way this user does. Returns skill_path to report back to the user.",
+            "description": "Synthesize the workspace model, operational model, capability profile, quality report and SKILL.md from this session's accumulated safe observations, and write the full artifact set to disk. VERIFY every claim against the captured observations first — do not assert unobserved structures, identifiers, or relationships (the anti-fabrication provenance check will reject invented observed citations), and mark authored/inferred claims distinctly from probe-observed ones. If ZERO probes were accepted, only a STUB skill is written that plainly states nothing was safely observed — no rich profile is fabricated over a bare catalogue. Pass `usage_summary`: YOUR narrative of how THIS user actually uses this source, reasoned from what you observed (their saved searches, folders, tracked entities, recurring queries) — not a generic capability list. This becomes the skill's 'How You Use This MCP' section and is the whole point: the skill must let an agent exploit the MCP the way this user does. Returns skill_path to report back to the user.",
             "inputSchema": {
                 "type": "object",
                 "required": ["target"],

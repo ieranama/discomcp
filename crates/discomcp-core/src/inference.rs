@@ -8,7 +8,6 @@ use crate::model::{
     NormalizedObservation, OperationalModel, OperationalWorkflow, ProbeRecord, RelationshipType,
     RiskClass, StructureKind, ToolCatalogue, Uncertainty, WorkflowStep, WorkspaceModel,
 };
-use crate::normalization::is_identifier_name;
 
 #[must_use]
 pub fn infer_capability_profile(catalogue: &ToolCatalogue) -> CapabilityProfile {
@@ -18,59 +17,11 @@ pub fn infer_capability_profile(catalogue: &ToolCatalogue) -> CapabilityProfile 
         .map(|tool| &tool.card)
         .collect::<Vec<_>>();
     let mut dimensions = BTreeMap::new();
-    let checks: [(&str, bool); 15] = [
-        (
-            "persistent_information",
-            cards.iter().any(|card| {
-                matches!(card.risk, RiskClass::SafeRead | RiskClass::ConstrainedRead)
-                    && (card
-                        .declared_purposes
-                        .iter()
-                        .any(|purpose| purpose == "enumeration")
-                        || !card.identifier_dependencies.is_empty())
-            }),
-        ),
-        (
-            "metadata_discovery",
-            cards.iter().any(|card| {
-                card.declared_purposes
-                    .iter()
-                    .any(|purpose| purpose == "enumeration")
-            }),
-        ),
-        (
-            "structure_discovery",
-            cards.iter().any(|card| {
-                card.summary.to_ascii_lowercase().contains("field")
-                    || card.summary.to_ascii_lowercase().contains("schema")
-                    || card
-                        .declared_purposes
-                        .iter()
-                        .any(|purpose| purpose == "enumeration")
-            }),
-        ),
-        (
-            "search",
-            cards.iter().any(|card| {
-                card.declared_purposes
-                    .iter()
-                    .any(|purpose| purpose == "search")
-            }),
-        ),
-        (
-            "record_retrieval",
-            cards.iter().any(|card| {
-                matches!(card.risk, RiskClass::SafeRead | RiskClass::ConstrainedRead)
-                    && !card.identifier_dependencies.is_empty()
-            }),
-        ),
-        (
-            "structured_query",
-            cards.iter().any(|card| {
-                card.searchable_text.to_ascii_lowercase().contains("query")
-                    && matches!(card.risk, RiskClass::SafeRead | RiskClass::ConstrainedRead)
-            }),
-        ),
+    // Only risk/confirmation projections survive — pure `card.risk` and catalogue
+    // facts. The substring/keyword dimensions (structure_discovery, structured_query,
+    // search, metadata_discovery, ...) are gone: the agent authors capability
+    // narrative from the raw observations, not from text-matched guesses.
+    let checks: [(&str, bool); 9] = [
         (
             "computation",
             cards
@@ -115,7 +66,7 @@ pub fn infer_capability_profile(catalogue: &ToolCatalogue) -> CapabilityProfile 
     for (name, enabled) in checks {
         let sources = cards
             .iter()
-            .filter(|card| capability_related(name, &card.risk, &card.declared_purposes))
+            .filter(|card| capability_related(name, &card.risk))
             .map(|card| format!("tool:{}", card.name))
             .collect::<Vec<_>>();
         let claim = if enabled {
@@ -174,7 +125,7 @@ pub fn infer_workspace_model(
     }
     let mut structures = structures.into_values().collect::<Vec<_>>();
     structures.sort_by(|left, right| left.normalized_name.cmp(&right.normalized_name));
-    let mut relationships = infer_relationships(&structures, observations);
+    let mut relationships = containment_relationships(&structures);
     merge_relationships(
         &mut relationships,
         provenance_relationships(probe_log, &origins),
@@ -192,7 +143,7 @@ pub fn infer_workspace_model(
             ),
         })
         .collect::<Vec<_>>();
-    let workflows = infer_workflows(catalogue, probe_log, observations);
+    let workflows = infer_workflows(probe_log, observations);
     let uncertainties = initial_uncertainties(catalogue, observations);
     WorkspaceModel {
         target_id: target_id.to_string(),
@@ -247,7 +198,7 @@ pub fn operational_model(
     }
 }
 
-fn capability_related(name: &str, risk: &RiskClass, purposes: &[String]) -> bool {
+fn capability_related(name: &str, risk: &RiskClass) -> bool {
     match name {
         "mutation" => *risk == RiskClass::Mutation,
         "external_side_effects" => *risk == RiskClass::ExternalSideEffect,
@@ -255,10 +206,7 @@ fn capability_related(name: &str, risk: &RiskClass, purposes: &[String]) -> bool
         "administration" => *risk == RiskClass::Administrative,
         "arbitrary_execution" => *risk == RiskClass::ArbitraryExecution,
         "computation" => *risk == RiskClass::PureComputation,
-        "search" => purposes.iter().any(|purpose| purpose == "search"),
-        "metadata_discovery" | "structure_discovery" => {
-            purposes.iter().any(|purpose| purpose == "enumeration")
-        }
+        "sensitive_reads" => *risk == RiskClass::SensitiveRead,
         _ => matches!(risk, RiskClass::SafeRead | RiskClass::ConstrainedRead),
     }
 }
@@ -272,24 +220,20 @@ struct StructureOrigin {
     pointer: String,
 }
 
-/// The payload root can itself be the entity, or a bare list of them. It has no
-/// parent key, so the keyed walk below would never name it.
+/// The payload root can itself be an object, or a bare list of objects. It has
+/// no parent key, so the keyed walk below never reaches it — index it here at
+/// the empty pointer.
 fn collect_root_structure(
     observation: &NormalizedObservation,
     structures: &mut BTreeMap<String, DiscoveredStructure>,
     produced: &mut Vec<StructureOrigin>,
 ) {
-    let items: &[Value] = match &observation.sample {
-        Value::Array(items) if items.first().is_some_and(Value::is_object) => items,
-        Value::Object(object)
-            if !wraps_a_collection(object) && likely_record_object("", object) =>
-        {
-            std::slice::from_ref(&observation.sample)
-        }
+    let (items, is_collection): (&[Value], bool) = match &observation.sample {
+        Value::Array(items) if items.first().is_some_and(Value::is_object) => (items, true),
+        Value::Object(_) => (std::slice::from_ref(&observation.sample), false),
         _ => return,
     };
-    let name = structure_name("", items, observation);
-    let structure = make_structure(&name, "", items, observation, "");
+    let structure = make_structure("", items, observation, is_collection);
     record_origin(produced, &structure, "");
     merge_structure(structures, structure);
 }
@@ -305,16 +249,11 @@ fn record_origin(
     });
 }
 
-/// A wrapper such as `{kind, etag, items: [...]}` is not an entity itself; its
-/// collection children get named on their own.
-fn wraps_a_collection(object: &serde_json::Map<String, Value>) -> bool {
-    object.values().any(|value| {
-        value
-            .as_array()
-            .is_some_and(|items| items.first().is_some_and(Value::is_object))
-    })
-}
-
+/// Indexes EVERY nested object and array-of-objects at its JSON pointer. No
+/// entity-naming, record-detection, or wrapper heuristics: the pointer IS the
+/// structure key, and the agent authors the human name downstream. Array
+/// elements recurse under the array's pointer (index-stripped) so a nested
+/// object at `/items/0/owner` is keyed `/items/owner`.
 fn collect_structures_from_value(
     value: &Value,
     pointer: &str,
@@ -328,9 +267,7 @@ fn collect_structures_from_value(
                 let child_pointer = format!("{pointer}/{}", escape_pointer(key));
                 match child {
                     Value::Array(items) if items.first().is_some_and(Value::is_object) => {
-                        let name = structure_name(key, items, observation);
-                        let structure =
-                            make_structure(&name, key, items, observation, &child_pointer);
+                        let structure = make_structure(&child_pointer, items, observation, true);
                         record_origin(produced, &structure, &child_pointer);
                         merge_structure(structures, structure);
                         for item in items {
@@ -343,14 +280,12 @@ fn collect_structures_from_value(
                             );
                         }
                     }
-                    Value::Object(child_object) if likely_record_object(key, child_object) => {
-                        let name = structure_name(key, std::slice::from_ref(child), observation);
+                    Value::Object(_) => {
                         let structure = make_structure(
-                            &name,
-                            key,
+                            &child_pointer,
                             std::slice::from_ref(child),
                             observation,
-                            &child_pointer,
+                            false,
                         );
                         record_origin(produced, &structure, &child_pointer);
                         merge_structure(structures, structure);
@@ -362,13 +297,7 @@ fn collect_structures_from_value(
                             produced,
                         );
                     }
-                    _ => collect_structures_from_value(
-                        child,
-                        &child_pointer,
-                        observation,
-                        structures,
-                        produced,
-                    ),
+                    _ => {}
                 }
             }
         }
@@ -381,34 +310,37 @@ fn collect_structures_from_value(
     }
 }
 
+/// Builds an UNNAMED shape keyed by its pointer: leaf-scalar fields with types
+/// and distinct values. `is_collection` is the only mechanical verdict (array
+/// of objects vs a single object). No identifier judgement — the agent decides.
 fn make_structure(
-    name: &str,
-    source_key: &str,
+    pointer: &str,
     items: &[Value],
     observation: &NormalizedObservation,
-    pointer: &str,
+    is_collection: bool,
 ) -> DiscoveredStructure {
-    let source_label = if source_key.is_empty() {
-        name
-    } else {
-        source_key
-    };
     let mut fields = BTreeMap::<String, DiscoveredField>::new();
     for item in items {
         if let Some(object) = item.as_object() {
             for (field_name, field_value) in object {
+                if field_value.is_object() || field_value.is_array() {
+                    continue;
+                }
+                let field_pointer = format!("{pointer}/{field_name}");
                 let field = fields.entry(field_name.clone()).or_insert_with(|| DiscoveredField {
                     name: field_name.clone(),
                     type_summary: value_type(field_value),
                     enum_values: observation
                         .observed_enum_values
-                        .get(field_name)
+                        .get(&field_pointer)
                         .cloned()
                         .unwrap_or_default(),
-                    is_identifier: is_identifier_name(field_name),
+                    // Vestigial: identifier-ness is the agent's call now. Kept
+                    // for wire-compat; always mechanically `false`.
+                    is_identifier: false,
                     evidence: EvidenceClaim::observed(
-                        format!("Field `{field_name}` appears in an observed `{source_label}` sample."),
-                        format!("observation:{}{pointer}/{field_name}", observation.id),
+                        format!("Field `{field_name}` appears in an observed sample at `{pointer}`."),
+                        format!("observation:{}{field_pointer}", observation.id),
                         0.9,
                     ),
                 });
@@ -419,42 +351,34 @@ fn make_structure(
         }
     }
     let fields = fields.into_values().collect::<Vec<_>>();
-    let identifiers = fields
-        .iter()
-        .filter(|field| field.is_identifier)
-        .map(|field| field.name.clone())
-        .collect::<Vec<_>>();
     let enum_values = fields
         .iter()
         .filter(|field| !field.enum_values.is_empty())
         .map(|field| (field.name.clone(), field.enum_values.clone()))
         .collect();
-    let kind = if identifiers.is_empty() {
-        StructureKind::List
+    let kind = if is_collection {
+        StructureKind::Collection
     } else {
-        StructureKind::RecordCollection
+        StructureKind::Object
     };
+    let display_pointer = if pointer.is_empty() { "/" } else { pointer };
     DiscoveredStructure {
-        declared_name: name.to_string(),
-        normalized_name: normalize_name(name),
+        declared_name: pointer.to_string(),
+        normalized_name: pointer.to_string(),
         possible_semantic_type: kind,
-        description: if source_key.is_empty() {
-            format!("Observed as the `{}` response payload.", observation.tool)
-        } else {
-            format!(
-                "Observed from `{}` output field `{source_key}`.",
-                observation.tool
-            )
-        },
+        description: format!(
+            "Observed at pointer `{display_pointer}` in the `{}` response.",
+            observation.tool
+        ),
         fields,
-        identifiers,
+        identifiers: Vec::new(),
         enum_values,
         possible_parents: Vec::new(),
         possible_children: Vec::new(),
         source_tools: vec![observation.tool.clone()],
         source_resources: Vec::new(),
         evidence: EvidenceClaim::observed(
-            format!("`{name}` has an observed object shape."),
+            format!("An object shape was observed at pointer `{display_pointer}`."),
             format!("observation:{}{pointer}", observation.id),
             0.9,
         ),
@@ -492,53 +416,39 @@ fn merge_structure(
     }
 }
 
-fn infer_relationships(
-    structures: &[DiscoveredStructure],
-    observations: &[NormalizedObservation],
-) -> Vec<DiscoveredRelationship> {
-    let names = structures
+/// Containment is derived purely from the pointer index: a structure at pointer
+/// `P` contains the structure at its immediate deeper pointer. The structures
+/// are observed, but the containment relationship itself is inferred (labelled
+/// as such downstream), never a guessed `*_id` foreign key.
+fn containment_relationships(structures: &[DiscoveredStructure]) -> Vec<DiscoveredRelationship> {
+    let pointers = structures
         .iter()
         .map(|structure| structure.normalized_name.clone())
         .collect::<BTreeSet<_>>();
     let mut relationships = Vec::new();
     for structure in structures {
-        for field in &structure.fields {
-            let Some(prefix) = reference_prefix(&field.name) else {
-                continue;
-            };
-            let prefix = normalize_name(prefix);
-            let prefix = prefix.as_str();
-            let target = names
-                .iter()
-                .find(|candidate| {
-                    *candidate == prefix
-                        || candidate.trim_end_matches('s') == prefix.trim_end_matches('s')
-                        || candidate.contains(prefix)
-                })
-                .cloned();
-            if let Some(target) = target {
-                let source = observations
-                    .iter()
-                    .find(|observation| observation.tool == structure.source_tools[0])
-                    .map_or_else(
-                        || "catalogue".to_string(),
-                        |observation| format!("observation:{}", observation.id),
-                    );
-                relationships.push(DiscoveredRelationship {
-                    from_structure: structure.normalized_name.clone(),
-                    to_structure: target,
-                    relationship_type: RelationshipType::References,
-                    via_fields: vec![field.name.clone()],
-                    evidence: EvidenceClaim::inferred(
-                        format!(
-                            "`{}.{}` appears to reference another discovered structure.",
-                            structure.normalized_name, field.name
-                        ),
-                        vec![source],
-                        0.7,
-                    ),
-                });
-            }
+        let child = structure.normalized_name.as_str();
+        // The parent is the longest OTHER structure pointer that is a strict
+        // prefix of this one — the immediate container.
+        let parent = pointers
+            .iter()
+            .filter(|candidate| {
+                candidate.as_str() != child
+                    && (candidate.is_empty() || child.starts_with(&format!("{candidate}/")))
+            })
+            .max_by_key(|candidate| candidate.len());
+        if let Some(parent) = parent {
+            relationships.push(DiscoveredRelationship {
+                from_structure: parent.clone(),
+                to_structure: child.to_string(),
+                relationship_type: RelationshipType::Contains,
+                via_fields: Vec::new(),
+                evidence: EvidenceClaim::inferred(
+                    format!("The structure at `{parent}` contains the structure at `{child}`."),
+                    vec![format!("structure:{child}")],
+                    0.8,
+                ),
+            });
         }
     }
     relationships
@@ -628,7 +538,6 @@ fn merge_relationships(
 }
 
 fn infer_workflows(
-    catalogue: &ToolCatalogue,
     probe_log: &[ProbeRecord],
     observations: &[NormalizedObservation],
 ) -> Vec<OperationalWorkflow> {
@@ -700,45 +609,11 @@ fn infer_workflows(
             ),
         });
     }
-    for tool in &catalogue.tools {
-        if tool.card.risk.requires_confirmation() {
-            workflows.push(OperationalWorkflow {
-                name: format!("Plan `{}` with explicit confirmation", tool.raw.name),
-                supported_user_intent: format!(
-                    "Prepare, but do not automatically execute, the `{}` operation.",
-                    tool.raw.name
-                ),
-                preconditions: vec!["Read the current state first when a safe read tool exists.".to_string()],
-                ordered_tool_sequence: vec![WorkflowStep {
-                    tool: tool.raw.name.clone(),
-                    purpose: "Execute only after the user has reviewed exact arguments and confirmed.".to_string(),
-                    argument_derivation: tool.card.required_arguments.clone(),
-                    identifier_source: Some(
-                        "Use an observed identifier or explicit user-provided value; never invent one."
-                            .to_string(),
-                    ),
-                    confirmation_required: true,
-                }],
-                expected_result: "The target-specific state change or side effect documented by the tool."
-                    .to_string(),
-                optional_traversal: Vec::new(),
-                mutation_boundary: "This operation was not executed during profiling.".to_string(),
-                confirmation_requirements: vec![
-                    "Present exact arguments and require explicit user confirmation immediately before execution."
-                        .to_string(),
-                ],
-                verification_steps: vec![
-                    "Use a safe read tool after execution when one can verify the intended result."
-                        .to_string(),
-                ],
-                failure_handling: vec!["Do not retry irreversible actions without renewed confirmation.".to_string()],
-                evidence: EvidenceClaim::declared(
-                    format!("`{}` is declared by the target and classified by runtime policy.", tool.raw.name),
-                    format!("tool:{}", tool.raw.name),
-                ),
-            });
-        }
-    }
+    // The per-tool "Plan X with confirmation" branch is gone: it was 100%
+    // templated English generated even with zero probes, and its content — the
+    // confirmation boundary for each risky tool — is already surfaced mechanically
+    // via `operational_model.confirmation_boundaries`. Only probe-derived
+    // workflows remain here.
     workflows
 }
 
@@ -783,127 +658,6 @@ fn initial_uncertainties(
     uncertainties
 }
 
-/// Names a structure after the entity it holds. The entity's own `kind` is the
-/// most reliable signal; a generic wrapper key (`items`, `data`, ...) carries no
-/// meaning, so fall back to the caller's context and finally the tool name.
-fn structure_name(
-    source_key: &str,
-    items: &[Value],
-    observation: &NormalizedObservation,
-) -> String {
-    if let Some(kind) = items.iter().find_map(kind_name) {
-        return kind;
-    }
-    if source_key.is_empty() || is_generic_collection_key(source_key) {
-        if let Some(collection) = observation
-            .arguments
-            .get("collection_id")
-            .and_then(Value::as_str)
-        {
-            return collection.to_string();
-        }
-        return entity_name_from_tool(&observation.tool);
-    }
-    source_key.to_string()
-}
-
-/// `"calendar#calendarListEntry"` -> `calendarListEntry` (Google/GData convention).
-fn kind_name(item: &Value) -> Option<String> {
-    let kind = item.get("kind")?.as_str()?;
-    let name = kind.rsplit('#').next().unwrap_or(kind).trim();
-    (!name.is_empty()).then(|| name.to_string())
-}
-
-fn is_generic_collection_key(key: &str) -> bool {
-    matches!(
-        key,
-        "items" | "records" | "rows" | "entries" | "data" | "results" | "values"
-    )
-}
-
-const VERBS: [&str; 8] = [
-    "list", "get", "search", "query", "fetch", "read", "find", "all",
-];
-
-/// `calendar_calendarList_list` -> `calendarList`; `list_calendars` -> `calendar`;
-/// `gmail_users_getProfile` -> `Profile`.
-fn entity_name_from_tool(tool: &str) -> String {
-    let mut segments = tool
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|segment| !segment.is_empty() && !is_verb_segment(segment))
-        .map(strip_verb_prefix)
-        .collect::<Vec<_>>();
-    let Some(last) = segments.pop() else {
-        return "result".to_string();
-    };
-    singularize(last)
-}
-
-fn is_verb_segment(segment: &str) -> bool {
-    let segment = segment.to_ascii_lowercase();
-    VERBS.contains(&segment.as_str())
-}
-
-/// `getProfile` -> `Profile`, so a camelCase verb prefix does not become the name.
-fn strip_verb_prefix(segment: &str) -> &str {
-    VERBS
-        .iter()
-        .find_map(|verb| {
-            segment
-                .strip_prefix(verb)
-                .filter(|rest| rest.starts_with(|character: char| character.is_ascii_uppercase()))
-        })
-        .unwrap_or(segment)
-}
-
-fn singularize(value: &str) -> String {
-    // "companies" -> "company", "entities" -> "entity"
-    if let Some(stem) = value.strip_suffix("ies") {
-        if stem.len() > 1 {
-            return format!("{stem}y");
-        }
-    }
-    // "-es" after a sibilant (s/x/z/ch/sh): "searches" -> "search",
-    // "boxes" -> "box", "statuses" -> "status". Strip only the "es".
-    if let Some(stem) = value.strip_suffix("es") {
-        if ["s", "x", "z", "ch", "sh"]
-            .iter()
-            .any(|sibilant| stem.ends_with(sibilant))
-        {
-            return stem.to_string();
-        }
-    }
-    // Best-effort: strip a plural "s", but leave singular nouns that happen to
-    // end in "s" — "ss" (address), Latin "-us" (status, corpus), "-is"
-    // (analysis) — unchanged.
-    let keep = value.ends_with("ss") || value.ends_with("us") || value.ends_with("is");
-    match value.strip_suffix('s') {
-        Some(stem) if stem.len() > 2 && !keep => stem.to_string(),
-        _ => value.to_string(),
-    }
-}
-
-fn likely_record_object(key: &str, object: &serde_json::Map<String, Value>) -> bool {
-    !matches!(key, "meta" | "metadata" | "pagination" | "page")
-        && (object.contains_key("id")
-            || object.keys().any(|field| field.ends_with("_id"))
-            || object.len() >= 3)
-}
-
-fn normalize_name(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(char::to_lowercase)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn value_type(value: &Value) -> String {
     match value {
         Value::Object(_) => "object".to_string(),
@@ -914,14 +668,6 @@ fn value_type(value: &Value) -> String {
         Value::Bool(_) => "boolean".to_string(),
         Value::Null => "null".to_string(),
     }
-}
-
-/// The structure a reference field points at: `calendar_id` / `calendarId` -> `calendar`.
-fn reference_prefix(name: &str) -> Option<&str> {
-    name.strip_suffix("_id")
-        .or_else(|| name.strip_suffix("-id"))
-        .or_else(|| name.strip_suffix("Id"))
-        .filter(|prefix| !prefix.is_empty())
 }
 
 fn escape_pointer(value: &str) -> String {
@@ -951,20 +697,6 @@ mod tests {
     use crate::model::{ExplorationBudgets, PrivacyMode};
     use crate::normalization::normalize_observation;
     use crate::redaction::Redactor;
-
-    #[test]
-    fn singularize_handles_english_plural_rules() {
-        // The bug that produced "searche": naive trailing-s strip on "-es".
-        assert_eq!(singularize("searches"), "search");
-        assert_eq!(singularize("companies"), "company");
-        assert_eq!(singularize("entities"), "entity");
-        assert_eq!(singularize("statuses"), "status");
-        assert_eq!(singularize("boxes"), "box");
-        assert_eq!(singularize("items"), "item");
-        // Unchanged: non-plural and mass nouns.
-        assert_eq!(singularize("address"), "address");
-        assert_eq!(singularize("status"), "status");
-    }
 
     /// Mirrors the engine: unwrap the envelope, redact the payload, then normalize.
     /// `Balanced` is the default mode; under `Strict` an email-shaped identifier is
@@ -998,7 +730,9 @@ mod tests {
     }
 
     #[test]
-    fn enveloped_payload_yields_real_entity_structure_and_identifiers() {
+    fn enveloped_payload_yields_pointer_indexed_structure_and_identifiers() {
+        // Naming is the agent's job now: Rust emits an UNNAMED shape keyed by the
+        // JSON pointer `/items`, with the real fields and a citable identifier.
         let response = calendar_envelope(json!({
             "kind": "calendar#calendarList",
             "etag": "\"p33vs9nt8hb59a0o\"",
@@ -1017,25 +751,22 @@ mod tests {
         let identifier = observation
             .identifiers
             .iter()
-            .find(|identifier| identifier.name == "id")
-            .expect("payload identifier must be recorded");
+            .find(|identifier| identifier.json_pointer == "/items/0/id")
+            .expect("payload identifier must be recorded at its pointer");
         assert_eq!(
             identifier.value,
             "en.spain#holiday@group.v.calendar.google.com"
         );
-        assert_eq!(identifier.json_pointer, "/items/0/id");
 
         let workspace =
             infer_workspace_model("gws", &ToolCatalogue::default(), &[observation], &[]);
         let structure = workspace
             .structures
             .iter()
-            .find(|structure| structure.normalized_name == "calendarlistentry")
-            .expect("structure must be named after the entity kind, not `content`");
-        assert_eq!(
-            structure.possible_semantic_type,
-            StructureKind::RecordCollection
-        );
+            .find(|structure| structure.normalized_name == "/items")
+            .expect("structure must be keyed by its JSON pointer");
+        // Array-of-objects is flagged mechanically as a Collection, no `kind` parse.
+        assert_eq!(structure.possible_semantic_type, StructureKind::Collection);
         for field in ["id", "summary", "timeZone", "accessRole"] {
             assert!(
                 structure
@@ -1045,14 +776,6 @@ mod tests {
                 "missing real field `{field}`"
             );
         }
-        assert!(structure.identifiers.contains(&"id".to_string()));
-        assert!(
-            !workspace
-                .structures
-                .iter()
-                .any(|structure| structure.normalized_name == "content"),
-            "the MCP envelope must not be mistaken for a workspace structure"
-        );
     }
 
     #[test]
@@ -1067,9 +790,12 @@ mod tests {
         let structure = workspace
             .structures
             .iter()
-            .find(|structure| structure.normalized_name == "things")
-            .expect("items should be represented by collection id context");
-        assert!(structure.identifiers.contains(&"id".to_string()));
+            .find(|structure| structure.normalized_name == "/items")
+            .expect("the `items` collection is keyed by its pointer");
+        assert!(
+            structure.fields.iter().any(|field| field.name == "id"),
+            "the `id` leaf must be a field"
+        );
     }
 
     #[test]
@@ -1111,7 +837,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_object_payload_is_named_from_the_tool() {
+    fn bare_object_payload_emits_a_root_structure_with_its_leaves() {
+        // Inverted from the old "name a bare object from the tool" behaviour: a
+        // bare object is the root structure (pointer ``), its scalar leaves
+        // captured as fields — no tool-name entity guessing.
         let observation = observe(
             "gmail_users_getProfile",
             json!({}),
@@ -1121,22 +850,22 @@ mod tests {
         );
         let workspace =
             infer_workspace_model("gws", &ToolCatalogue::default(), &[observation], &[]);
-        assert!(
-            workspace
-                .structures
-                .iter()
-                .any(|structure| structure.normalized_name == "profile"),
-            "bare object payload should be named from the tool: {:?}",
-            workspace
-                .structures
-                .iter()
-                .map(|structure| &structure.normalized_name)
-                .collect::<Vec<_>>()
-        );
+        let root = workspace
+            .structures
+            .iter()
+            .find(|structure| structure.normalized_name.is_empty())
+            .expect("the bare object is the root structure");
+        assert_eq!(root.possible_semantic_type, StructureKind::Object);
+        for field in ["emailAddress", "messagesTotal", "historyId"] {
+            assert!(
+                root.fields.iter().any(|candidate| candidate.name == field),
+                "missing root leaf `{field}`"
+            );
+        }
     }
 
     #[test]
-    fn camel_case_reference_fields_produce_relationships() {
+    fn sibling_collections_produce_containment_edges_from_the_root() {
         let observation = observe(
             "calendar_events_list",
             json!({}),
@@ -1147,15 +876,19 @@ mod tests {
         );
         let workspace =
             infer_workspace_model("gws", &ToolCatalogue::default(), &[observation], &[]);
-        assert!(
-            workspace.relationships.iter().any(|relationship| {
-                relationship.from_structure == "events"
-                    && relationship.to_structure == "calendars"
-                    && relationship.via_fields == vec!["calendarId".to_string()]
-            }),
-            "expected events.calendarId -> calendars, got {:?}",
-            workspace.relationships
-        );
+        // Containment is derived from the pointer index, not a `*_id` name match:
+        // the root `` contains both `/calendars` and `/events`.
+        for child in ["/calendars", "/events"] {
+            assert!(
+                workspace.relationships.iter().any(|relationship| {
+                    relationship.from_structure.is_empty()
+                        && relationship.to_structure == child
+                        && relationship.relationship_type == RelationshipType::Contains
+                }),
+                "expected containment `` -> `{child}`, got {:?}",
+                workspace.relationships
+            );
+        }
     }
 
     #[test]
@@ -1217,11 +950,15 @@ mod tests {
             &[calendars, events],
             &[record],
         );
+        // The provenance traversal is the only foreign-key edge now, keyed by
+        // pointer: the consuming observation's root `` references the `/items`
+        // structure that produced the accepted identifier.
         assert!(
             workspace.relationships.iter().any(|relationship| {
-                relationship.from_structure == "event"
-                    && relationship.to_structure == "calendarlistentry"
+                relationship.from_structure.is_empty()
+                    && relationship.to_structure == "/items"
                     && relationship.via_fields == vec!["calendarId".to_string()]
+                    && relationship.relationship_type == RelationshipType::References
             }),
             "the enforced traversal is the relationship, got {:?}",
             workspace.relationships
@@ -1229,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_inference_detects_record_collection_and_identifiers() {
+    fn generic_inference_indexes_collection_by_pointer_with_identifiers() {
         let observation = normalize_observation(
             "probe-1".to_string(),
             "list_things".to_string(),
@@ -1242,12 +979,9 @@ mod tests {
         let structure = workspace
             .structures
             .iter()
-            .find(|structure| structure.normalized_name == "things")
-            .expect("items should be represented by collection id context");
-        assert!(structure.identifiers.contains(&"id".to_string()));
-        assert_eq!(
-            structure.possible_semantic_type,
-            StructureKind::RecordCollection
-        );
+            .find(|structure| structure.normalized_name == "/items")
+            .expect("the collection is keyed by its pointer");
+        assert!(structure.fields.iter().any(|field| field.name == "id"));
+        assert_eq!(structure.possible_semantic_type, StructureKind::Collection);
     }
 }

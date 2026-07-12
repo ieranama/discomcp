@@ -128,6 +128,6 @@ async fn configured_stdio_target_profiles_with_a_command_reasoning_backend() {
         .workspace_model
         .structures
         .iter()
-        .any(|structure| structure.normalized_name == "widgets"));
+        .any(|structure| structure.normalized_name.ends_with("widgets")));
     let _ = std::fs::remove_dir_all(output);
 }

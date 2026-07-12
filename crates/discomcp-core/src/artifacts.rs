@@ -99,6 +99,31 @@ pub fn write_profile_artifacts(profile: &TargetProfile, output_dir: &Path) -> Re
     Ok(())
 }
 
+/// Overwrites SKILL.md with a STUB when a session finished with zero accepted
+/// read observations. A catalogue-only run (dead auth, all probes rejected) must
+/// not emit a rich-looking profile: no Tool-Safety buckets, no Recommended
+/// Sequences, no capability profile rendered as if grounded. It states plainly
+/// that nothing was safely observed and how to re-profile.
+pub fn write_stub_skill(output_dir: &Path, target_id: &str) -> Result<()> {
+    let mut output = String::from("# DiscoMCP Operational Skill\n\n");
+    output.push_str("## Insufficient Observations\n\n");
+    output.push_str(&format!(
+        "`unknown`: Profiling target `{target_id}` produced ZERO accepted read observations. \
+         Nothing about this target's structures, identifiers, relationships, or safe workflows \
+         was established. This SKILL is a STUB, not a grounded profile — do not treat the cached \
+         catalogue as a verified capability map.\n\n"
+    ));
+    output.push_str("## What To Do Next\n\n");
+    output.push_str(
+        "`user_defined`: Re-profile in a BACKGROUND subagent so the user is not blocked: run \
+         `discomcp serve`, then inspect_target -> execute_probe in a loop driven by each result's \
+         `gaps` report -> finalize_profile once coverage is real. If every probe was rejected, \
+         the target's auth or connectivity likely failed; verify access before re-profiling. \
+         Never run mutation/side-effect/destructive/admin tools during a refresh.\n",
+    );
+    write_text(output_dir, "SKILL.md", &output)
+}
+
 pub fn regenerate_skill(profile_dir: &Path) -> Result<PathBuf> {
     let metadata: ProfileMetadata = read_json(profile_dir, "profile-metadata.json")?;
     let catalogue: ToolCatalogue = read_json(profile_dir, "tool-catalogue.json")?;
@@ -438,6 +463,26 @@ fn render_skill(profile: &TargetProfile) -> String {
             output.push('\n');
         }
     }
+    output.push_str("### Declared But Unverified\n\n");
+    let unverified = profile
+        .catalogue
+        .tools
+        .iter()
+        .filter(|tool| tool.card.risk_evidence == "agent_declared_unverified")
+        .collect::<Vec<_>>();
+    if unverified.is_empty() {
+        output.push_str(
+            "`unknown`: No tool carried an agent classification without a successful probe.\n\n",
+        );
+    } else {
+        for tool in unverified {
+            output.push_str(&format!(
+                "- `{}`: the agent declared a class but no read probe was accepted — treat as UNVERIFIED, not confirmed safe.\n",
+                tool.raw.name
+            ));
+        }
+        output.push('\n');
+    }
     output.push_str("## Recommended Tool Sequences\n\n");
     append_workflows(&mut output, &profile.operational_model);
     output.push_str("## User-Specific Workflows\n\n");
@@ -488,16 +533,27 @@ fn render_skill(profile: &TargetProfile) -> String {
         output.push('\n');
     }
     output.push_str("## Examples\n\n");
-    if let Some(workflow) = profile.operational_model.workflows.first() {
-        output.push_str(&format!("`observed`: To follow **{}**:\n", workflow.name));
-        for (index, step) in workflow.ordered_tool_sequence.iter().enumerate() {
-            output.push_str(&format!(
-                "{}. Call `{}` only with validated arguments.\n",
-                index + 1,
-                step.tool
-            ));
-        }
-        output.push('\n');
+    // Observation-grounded: cite real json_pointers + redacted sample values from
+    // an accepted observation, not a restated tool list. When no probe was
+    // accepted the profile is a stub (see `write_stub_skill`) and never reaches
+    // this renderer.
+    let grounded_example = profile.observations.iter().find_map(|observation| {
+        observation
+            .identifiers
+            .first()
+            .map(|identifier| (observation, identifier))
+    });
+    if let Some((observation, identifier)) = grounded_example {
+        output.push_str(&format!(
+            "`observed`: `{}` returned `{}` = `{}` at pointer `{}`. Cite it as provenance \
+             (observation_id `{}`, json_pointer `{}`) to feed a later get-by-id probe — never invent one.\n\n",
+            observation.tool,
+            identifier.name,
+            identifier.value,
+            identifier.json_pointer,
+            identifier.observation_id,
+            identifier.json_pointer,
+        ));
     } else {
         output.push_str("`unknown`: No safe end-to-end example was established.\n\n");
     }

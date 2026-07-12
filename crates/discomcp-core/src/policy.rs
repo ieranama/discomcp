@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::mcp::McpClient;
 use crate::model::{
-    ArgumentSource, CataloguedTool, ExplorationBudgets, NormalizedObservation, ProbeDecision,
-    RiskClass, RuntimeDecision, RuntimeOutcome, ToolCatalogue,
+    ArgumentSource, ExplorationBudgets, NormalizedObservation, ProbeDecision, RiskClass,
+    RuntimeDecision, RuntimeOutcome, ToolCatalogue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -489,10 +489,7 @@ pub async fn execute_safe_probe(request: SafeProbeRequest<'_>) -> ProbeExecution
             &format!("arguments fail the target input schema: {reason}"),
         );
     }
-    if let Err(reason) = validate_identifier_provenance(tool, decision, observations) {
-        return rejected(risk, &reason);
-    }
-    if let Err(reason) = validate_sampling_limits(tool, &risk, &decision.arguments, budgets) {
+    if let Err(reason) = validate_identifier_provenance(decision, observations) {
         return rejected(risk, &reason);
     }
     if dry_run {
@@ -580,14 +577,17 @@ fn rejected(risk: RiskClass, reason: &str) -> ProbeExecution {
     }
 }
 
+/// The single mechanical truth check that survives: an argument declaring an
+/// `Observed` source must cite a `(observation_id, json_pointer, value)` that was
+/// actually captured. This is the anti-fabrication guard, not a heuristic — it
+/// applies to ANY argument whose declared source is `Observed`, regardless of key
+/// spelling. Every other former gate (no-provenance-at-all, `SchemaDefault` /
+/// `UserGoal` restriction, `Enum` schema-membership) is demoted: those are the
+/// agent's attributed evidence, no longer a rejection.
 fn validate_identifier_provenance(
-    tool: &CataloguedTool,
     decision: &ProbeDecision,
     observations: &[NormalizedObservation],
 ) -> Result<(), String> {
-    let Some(arguments) = decision.arguments.as_object() else {
-        return Ok(());
-    };
     let available: BTreeSet<(&str, &str, &str)> = observations
         .iter()
         .flat_map(|observation| {
@@ -601,115 +601,31 @@ fn validate_identifier_provenance(
         })
         .collect();
 
-    for (key, value) in arguments {
-        if !is_identifier_key(key) || value.as_str().is_none_or(str::is_empty) {
+    for provenance in &decision.argument_provenance {
+        let ArgumentSource::Observed {
+            observation_id,
+            json_pointer,
+        } = &provenance.source
+        else {
             continue;
-        }
-        let pointer = format!("/{key}");
-        let provenance = decision
-            .argument_provenance
-            .iter()
-            .find(|provenance| provenance.json_pointer == pointer)
-            .ok_or_else(|| {
-                format!(
-                    "identifier argument `{key}` has no provenance; identifiers may not be invented"
-                )
-            })?;
-        match &provenance.source {
-            ArgumentSource::Observed {
-                observation_id,
-                json_pointer,
-            } => {
-                let value = value.as_str().unwrap_or_default();
-                if !available.contains(&(observation_id, json_pointer, value)) {
-                    return Err(format!(
-                        "identifier argument `{key}` does not match the claimed observed source"
-                    ));
-                }
-            }
-            ArgumentSource::UserDefined => {}
-            ArgumentSource::Enum { schema_pointer } => {
-                let enum_values = tool
-                    .raw
-                    .input_schema
-                    .pointer(schema_pointer)
-                    .and_then(|schema| schema.get("enum"))
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| {
-                        format!("identifier argument `{key}` claims a non-enum schema source")
-                    })?;
-                if !enum_values.iter().any(|candidate| candidate == value) {
-                    return Err(format!(
-                        "identifier argument `{key}` is not in the declared enum"
-                    ));
-                }
-            }
-            ArgumentSource::SchemaDefault { .. } | ArgumentSource::UserGoal => {
-                return Err(format!(
-                    "identifier argument `{key}` must come from an observation, declared enum, or explicit user input"
-                ));
-            }
+        };
+        // The value the agent placed at the argument location this provenance
+        // describes. Non-string / absent arguments carry no citable value.
+        let Some(value) = decision
+            .arguments
+            .pointer(&provenance.json_pointer)
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !available.contains(&(observation_id.as_str(), json_pointer.as_str(), value)) {
+            return Err(format!(
+                "argument `{}` cites observed source {observation_id}{json_pointer} but no such value was captured; identifiers may not be invented",
+                provenance.json_pointer
+            ));
         }
     }
     Ok(())
-}
-
-fn validate_sampling_limits(
-    tool: &CataloguedTool,
-    risk: &RiskClass,
-    arguments: &Value,
-    budgets: &ExplorationBudgets,
-) -> Result<(), String> {
-    let Some(arguments) = arguments.as_object() else {
-        return Ok(());
-    };
-    // A list/page limit bounds how many ITEMS are requested, so it is capped by
-    // identifier coverage (high), not the full-record sample cap (low) — a list
-    // of names/ids can be pulled wide; the response-size cap still bounds bloat.
-    for &key in sampling_keys() {
-        if let Some(value) = arguments.get(key) {
-            if value
-                .as_u64()
-                .is_none_or(|number| number > u64::from(budgets.max_identifier_coverage))
-            {
-                return Err(format!(
-                    "sampling argument `{key}` exceeds the configured limit of {}",
-                    budgets.max_identifier_coverage
-                ));
-            }
-        }
-    }
-    let is_bounded_reader = matches!(risk, RiskClass::ConstrainedRead | RiskClass::SensitiveRead)
-        && has_sampling_property(&tool.raw.input_schema);
-    if is_bounded_reader
-        && !sampling_keys()
-            .iter()
-            .any(|key| arguments.contains_key(*key))
-    {
-        return Err("bounded read tool requires an explicit sampling argument".to_string());
-    }
-    Ok(())
-}
-
-fn sampling_keys() -> &'static [&'static str] {
-    &["limit", "page_size", "pageSize", "count", "first", "take"]
-}
-
-fn has_sampling_property(schema: &Value) -> bool {
-    schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_some_and(|properties| {
-            sampling_keys()
-                .iter()
-                .any(|key| properties.contains_key(*key))
-        })
-}
-
-/// The provenance rule must cover exactly the keys the normalizer records as
-/// observed identifiers, or an agent could invent one the runtime never checks.
-fn is_identifier_key(key: &str) -> bool {
-    crate::normalization::is_identifier_name(key)
 }
 
 #[cfg(test)]
@@ -809,7 +725,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invented_identifier_is_rejected_before_client_call() {
+    async fn fabricated_observed_provenance_is_rejected_before_client_call() {
+        // The one retained truth check: an argument that DECLARES an `Observed`
+        // source must cite a value that was actually captured. Citing a
+        // non-existent observation is fabrication and is rejected.
         let tool = fixture_tool();
         let catalogue = build_catalogue(vec![tool.clone()], Vec::new(), Vec::new());
         let client = MockMcpClient::new(
@@ -825,6 +744,13 @@ mod tests {
             selected_tool: Some("get_value".to_string()),
             arguments: json!({"value_id": "invented"}),
             confidence: 1.0,
+            argument_provenance: vec![ArgumentProvenance {
+                json_pointer: "/value_id".to_string(),
+                source: ArgumentSource::Observed {
+                    observation_id: "probe-404".to_string(),
+                    json_pointer: "/values/0/value_id".to_string(),
+                },
+            }],
             ..ProbeDecision::default()
         };
         let mut budget = RuntimeBudget::default();
@@ -872,6 +798,7 @@ mod tests {
                 value: "value-1".to_string(),
                 observation_id: "probe-001".to_string(),
                 json_pointer: "/values/0/value_id".to_string(),
+                from_tool: "list_values".to_string(),
                 evidence: EvidenceClaim::observed("id", "observation:probe-001", 1.0),
             }],
             sample: json!({}),
@@ -1127,34 +1054,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sampling_requirement_keys_off_the_declared_class() {
-        // A declared constrained read over a schema with a sampling property must
-        // pass an explicit sampling argument.
-        let raw_tool = tool(
-            "list_values",
-            "",
-            json!({
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "minimum": 1}},
-                "additionalProperties": false
-            }),
-        );
-        let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
-        let client = client_for(raw_tool, json!({"called": true}));
-        let result = execute(
-            &client,
-            &catalogue,
-            &declared_decision("list_values", json!({}), Some(RiskClass::ConstrainedRead)),
-            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
-        )
-        .await;
-        assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
-        assert!(result.runtime_decision.reason.contains("sampling"));
-        assert!(client.calls().lock().expect("lock").is_empty());
-    }
-
-    #[tokio::test]
-    async fn schema_and_sample_limits_are_rejected_before_execution() {
+    async fn schema_invalid_arguments_are_rejected_before_execution() {
+        // Sampling name-caps are gone; the response-byte cap is the only sampling
+        // bound. Schema validation still rejects before any target call, and a
+        // large explicit list limit is no longer rejected on a magic name-cap.
         let schema_tool = tool(
             "read_value",
             "Returns a value in a read-only operation.",
@@ -1177,6 +1080,8 @@ mod tests {
         assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
         assert!(client.calls().lock().expect("lock").is_empty());
 
+        // A large list limit now passes: it is bounded by the response-byte cap,
+        // not a sampling-name cap.
         let list_tool = tool(
             "list_values",
             "Lists a bounded read-only sample.",
@@ -1188,9 +1093,7 @@ mod tests {
             }),
         );
         let catalogue = build_catalogue(vec![list_tool.clone()], Vec::new(), Vec::new());
-        let client = client_for(list_tool, json!({"called": true}));
-        // A list limit is bounded by identifier coverage (Quick = 100), not the
-        // low record cap, so it may exceed the sample cap — but not the coverage.
+        let client = client_for(list_tool, json!({"items": []}));
         let over = execute(
             &client,
             &catalogue,
@@ -1198,8 +1101,8 @@ mod tests {
             &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
         )
         .await;
-        assert_eq!(over.runtime_decision.outcome, RuntimeOutcome::Rejected);
-        assert!(client.calls().lock().expect("lock").is_empty());
+        assert_eq!(over.runtime_decision.outcome, RuntimeOutcome::Accepted);
+        assert_eq!(client.calls().lock().expect("lock").len(), 1);
     }
 
     #[tokio::test]
@@ -1300,7 +1203,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn camel_case_identifier_arguments_require_provenance() {
+    async fn observed_existence_rule_holds_regardless_of_key_spelling() {
+        // The rule is no longer keyed on identifier-name spelling: ANY argument
+        // that DECLARES an `Observed` source must cite a captured value. A
+        // camelCase `calendarId` citing a non-existent observation is rejected;
+        // the same argument with NO provenance is no longer rejected here.
         let raw_tool = tool(
             "calendar_events_list",
             "Lists calendar events.",
@@ -1310,16 +1217,38 @@ mod tests {
             }),
         );
         let catalogue = build_catalogue(vec![raw_tool.clone()], Vec::new(), Vec::new());
-        let client = client_for(raw_tool, json!({"called": true}));
+        let client = client_for(raw_tool.clone(), json!({"called": true}));
+        let mut fabricated = decision("calendar_events_list", json!({"calendarId": "invented"}));
+        fabricated.argument_provenance = vec![ArgumentProvenance {
+            json_pointer: "/calendarId".to_string(),
+            source: ArgumentSource::Observed {
+                observation_id: "probe-404".to_string(),
+                json_pointer: "/items/0/id".to_string(),
+            },
+        }];
         let result = execute(
             &client,
             &catalogue,
-            &decision("calendar_events_list", json!({"calendarId": "invented"})),
+            &fabricated,
             &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
         )
         .await;
         assert_eq!(result.runtime_decision.outcome, RuntimeOutcome::Rejected);
         assert!(client.calls().lock().expect("lock").is_empty());
+
+        // With no provenance the probe is no longer rejected on a name heuristic.
+        let client = client_for(raw_tool, json!({"items": []}));
+        let permitted = execute(
+            &client,
+            &catalogue,
+            &decision(
+                "calendar_events_list",
+                json!({"calendarId": "user-supplied"}),
+            ),
+            &ExplorationBudgets::for_mode(&crate::model::ExplorationMode::Quick),
+        )
+        .await;
+        assert_eq!(permitted.runtime_decision.outcome, RuntimeOutcome::Accepted);
     }
 
     #[tokio::test]
@@ -1357,6 +1286,9 @@ mod tests {
         // to execute. Some reject on a write-verb name; others (updateVacation,
         // obliterate) on default-deny because no read verb sits first/last.
         for name in [
+            // Gate Y regression lock: a mutation (`files_update`) must stay
+            // rejected after the "thin Rust" refactor, declaration notwithstanding.
+            "files_update",
             "drive_files_update",
             "gmail_users_messages_send",
             "calendar_events_move",
