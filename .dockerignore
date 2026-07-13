@@ -1,0 +1,6 @@
+target/
+.git/
+.github/
+.discomcp/
+*.md
+!README.md
