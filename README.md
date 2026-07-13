@@ -4,7 +4,7 @@
 
 **Your agent, meet your tools.**
 
-Give any AI agent a real, safe understanding of the tools it connects to — in one command.
+Teach any AI agent how *you* use the tools it connects to — safely, in one command.
 
 [![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release&cacheSeconds=300)](https://github.com/ieranama/discomcp/releases)
@@ -15,16 +15,18 @@ Give any AI agent a real, safe understanding of the tools it connects to — in 
 
 Agents are great at code. They get lost inside your tools — they don't know which of a hundred actions matter, how your data connects, or what's safe to touch. So they guess, or they freeze.
 
-DiscoMCP fixes that. Point it at any MCP server and it hands your agent a ready-made skill: what the server does, how it's actually used, and exactly what's safe — learned by looking, and **without ever changing a thing**.
+DiscoMCP fixes that. Point it at any MCP server and it hands your agent a skill for how **you** use it — not a generic tool list, but *your* workflows on *your* data: the views, tables and records you actually work with, the sequences that answer your real questions, and how one result leads into the next. Learned by looking at your own workspace, and **without ever changing a thing**.
+
+A tool catalogue tells an agent the server has 90 actions. DiscoMCP tells it the five you actually use, in the order you use them, against the data that's really there.
 
 ## Why teams use it
 
 | | |
 | --- | --- |
-| 🧭 **Agents that know their way around** | Your agent gets a map of the tool instead of guessing — the sequences that answer real questions, and how one result leads to the next. |
+| 🎯 **Tailored to how you work** | Not a generic capability dump — a profile of *your* usage: your workflows, your conventions, the parts of your workspace that matter, grounded in what's really in your data. |
+| 🧭 **Agents that know their way around** | Your agent follows the sequences that answer real questions and chains one result into the next, instead of guessing across a hundred tools. |
 | 🔒 **Read-only, guaranteed** | Exploring can never write. It runs a step only when it can *prove* that step is a read. Nothing is deleted or modified while it learns. |
 | ⚡ **One command, zero setup** | A single 8 MB binary. No runtime, no toolchain — `npx` and you're running. |
-| 🧩 **Works with any MCP server** | Local or hosted. The same tool profiles your CRM, your data warehouse, or any API behind MCP. |
 
 ## Read-only, guaranteed
 
