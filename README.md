@@ -34,6 +34,20 @@ DiscoMCP explores behind a **default-deny gate**: it runs an action only when it
 
 So your agent can learn your production tools without you holding your breath.
 
+## Does it help?
+
+Same question, same server, same model — with and without the generated skill. Read-only, against a genuinely wide, unfamiliar server. `n=2` per row.
+
+| Task | Cold (no skill) | With skill | Tokens |
+| --- | --- | --- | --- |
+| Targeted lookup | ~12 round-trips | ~5 | **−28%** |
+| Cross-dataset reasoning | ~10 round-trips | ~6 | **−44%** |
+| Full pipeline trace | ~10–13 round-trips | ~3 | **−57%** |
+
+The harder and less familiar the task, the more it helps: the skill front-loads the map a cold agent has to rediscover by trial. Both reach correct answers — the skill reaches them in far fewer round-trips.
+
+_Small sample, directional — not a guarantee. On a trivial task or a narrow server the skill's own prompt cost can wash out what it saves; the durable win is fewer round-trips and steadier behavior on complex servers. Full method in [benchmarks/METRICS.md](benchmarks/METRICS.md)._
+
 ## Get started
 
 **1. Run it** — no install needed:
