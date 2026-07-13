@@ -2,7 +2,7 @@
 
 # 🪩 DiscoMCP
 
-**Your agent, meet your tools.**
+**Your agent, meet your tools and context.**
 
 Teach any AI agent how *you* use the tools it connects to — safely, in one command.
 
