@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "discomcp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "discomcp-core",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "discomcp-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "discomcp-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "discomcp-core",
  "serde",
