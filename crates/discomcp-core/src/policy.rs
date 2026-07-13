@@ -951,7 +951,7 @@ mod tests {
             "calendar_events_move",                // reparent, not delete
             "drive_permissions_update",            // admin mutation
             "gmail_users_settings_updateVacation", // settings mutation
-            "harmonic_clear_saved_search_net_new", // resets a "seen" marker
+            "provider_clear_saved_search_net_new", // resets a "seen" marker
         ];
         for name in agent_classified {
             assert!(

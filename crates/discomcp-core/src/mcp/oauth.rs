@@ -130,7 +130,7 @@ pub async fn ensure_token(
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     // Configured scopes win; otherwise fall back to what the server advertises.
-    // An empty `scope` is rejected as `invalid_scope` (observed on Attio).
+    // An empty `scope` is rejected as `invalid_scope` (observed on some providers).
     let scopes = if cfg.scopes.is_empty() {
         endpoints.scopes_supported.clone()
     } else {
@@ -722,10 +722,10 @@ mod tests {
 
     #[test]
     fn protected_resource_metadata_url_uses_origin() {
-        let endpoint = Url::parse("https://mcp.attio.com/mcp").expect("url");
+        let endpoint = Url::parse("https://mcp.example.com/mcp").expect("url");
         assert_eq!(
             protected_resource_metadata_url(&endpoint).as_str(),
-            "https://mcp.attio.com/.well-known/oauth-protected-resource"
+            "https://mcp.example.com/.well-known/oauth-protected-resource"
         );
         let notion = Url::parse("https://mcp.notion.com/mcp").expect("url");
         assert_eq!(
@@ -737,8 +737,8 @@ mod tests {
     #[test]
     fn as_metadata_url_handles_bare_and_pathful_issuers() {
         assert_eq!(
-            as_metadata_url("https://auth.attio.com").as_str(),
-            "https://auth.attio.com/.well-known/oauth-authorization-server"
+            as_metadata_url("https://auth.example.com").as_str(),
+            "https://auth.example.com/.well-known/oauth-authorization-server"
         );
         assert_eq!(
             as_metadata_url("https://auth.example.com/tenant/").as_str(),
@@ -839,9 +839,9 @@ mod tests {
 
     #[test]
     fn token_cache_path_sanitizes_host() {
-        let path = token_cache_path("mcp.attio.com:8443/weird");
+        let path = token_cache_path("mcp.example.com:8443/weird");
         let name = path.file_name().unwrap().to_string_lossy();
-        assert_eq!(name, "mcp.attio.com_8443_weird.json");
+        assert_eq!(name, "mcp.example.com_8443_weird.json");
     }
 
     #[test]
@@ -863,10 +863,10 @@ mod tests {
     #[test]
     fn www_authenticate_resource_metadata_param_is_extracted() {
         let header =
-            "Bearer resource_metadata=\"https://mcp.attio.com/.well-known/oauth-protected-resource\", error=\"invalid_token\"";
+            "Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\", error=\"invalid_token\"";
         assert_eq!(
             parse_www_authenticate_param(header, "resource_metadata").as_deref(),
-            Some("https://mcp.attio.com/.well-known/oauth-protected-resource")
+            Some("https://mcp.example.com/.well-known/oauth-protected-resource")
         );
     }
 }

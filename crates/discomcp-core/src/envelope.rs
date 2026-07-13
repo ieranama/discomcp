@@ -51,7 +51,7 @@ pub fn unwrap_mcp_envelope(value: &Value) -> Cow<'_, Value> {
 }
 
 /// Parse a text content block into structure. Tries JSON, then YAML (some MCP
-/// servers, e.g. Attio, return YAML-ish text rather than JSON). Only a
+/// servers return YAML-ish text rather than JSON). Only a
 /// structural result (object/array) is accepted, so a plain prose or scalar
 /// response stays a string rather than being coerced into a number/bool.
 fn parse_structured_text(text: &str) -> Option<Value> {
