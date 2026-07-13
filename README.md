@@ -6,8 +6,8 @@
 
 Give any AI agent a real, safe understanding of the tools it connects to — in one command.
 
-[![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release)](https://github.com/ieranama/discomcp/releases)
+[![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release&cacheSeconds=300)](https://github.com/ieranama/discomcp/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Follow-0A66C2?logo=linkedin&logoColor=white)](http://linkedin.com/in/inigo-erana/)
 
