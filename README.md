@@ -19,6 +19,10 @@ It connects to a target MCP, collects its declared capabilities and configured d
 
 DiscoMCP makes your agent be the one in the room you would like to dance with — not the one who shows up, starts flailing at every button on the mixing desk, and calls it improvisation. It learns the playlist first, asks before it touches the decks, and never, ever pulls the fire alarm to see what happens.
 
+The generated `SKILL.md` captures how **you** use that MCP — your read-only playbook, the identifier hops that chain one call into the next, the safety class of every tool — grounded in real observed responses with provenance, so your agent stops guessing.
+
+> **What it is / isn't.** DiscoMCP's value is *grounding* and a *provable read-only floor* for exploration — not token savings. Benchmarked honestly, the token story is noisy and we don't claim a number we can't defend. What we do guarantee: it lands your agent in the right tools with the right identifiers, and it never modifies anything while learning.
+
 ## Why DiscoMCP
 
 An MCP tool catalogue alone does not explain how a particular user's accessible workspace is organized or which tool sequence solves a real task. DiscoMCP keeps the target catalogue internal, records evidence for every important claim, and generates an operational model that agents can use without guessing.
@@ -33,9 +37,9 @@ The result answers questions such as:
 
 ## Safety Contract
 
-DiscoMCP separates model reasoning from deterministic runtime control. A reasoning backend may propose a probe, but the runtime validates the target tool, JSON arguments, identifier provenance, policy, budgets, response limits, and redaction before any call is made.
+**Exploring never writes.** DiscoMCP runs on a *default-deny* gate: a probe executes only when it is **provably a read** — the tool name is a read verb, the server marks it read-only, or (for a query tool) its argument parses as read-only SQL. A `SELECT` runs; a `DROP` on the *same* tool is rejected by inspecting the statement, not the tool name. A tool that merely *declares* itself safe, without proof, never executes.
 
-During profiling, the runtime never automatically executes tools classified as:
+The model proposes probes; the deterministic runtime decides. Before any call touches the target it validates the tool, JSON arguments, identifier provenance, policy, budgets, response limits, and redaction — and always rejects tools classified as:
 
 - mutation
 - external side effect
@@ -124,6 +128,19 @@ args = ["exec", "--model", "{model}"]
 model = "your-configured-model"
 input = "stdin_json"
 output = "stdout_json"
+```
+
+### Remote servers (Streamable HTTP + OAuth)
+
+Point at a hosted MCP over Streamable HTTP; DiscoMCP handles the OAuth 2.0 flow (PKCE, loopback callback) and caches the token locally:
+
+```toml
+[targets.attio]
+transport = "http"
+url = "https://mcp.attio.com/mcp"
+
+[targets.attio.oauth]
+scopes = ["mcp", "offline_access", "openid"]
 ```
 
 The command receives one serialized `ReasoningRequest` on stdin and must emit either a `ReasoningResponse` JSON object or the raw JSON value for its `output` on stdout. No target credentials or unredacted MCP response are interpolated into the command line.

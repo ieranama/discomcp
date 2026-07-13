@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-13
+
+### Added
+
+- Streamable HTTP transport with a full OAuth 2.0 flow (dynamic client registration, PKCE, loopback callback, local token cache) so DiscoMCP can profile hosted MCP servers, not just local stdio subprocesses.
+
+### Changed
+
+- **Default-deny read-only gate.** A probe now executes only when it is provably a read: a read-verb tool name, a server `readOnlyHint`, or (for a query executor) an argument that parses as read-only SQL (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`, no DDL/DML, no multi-statement). A write-verb name overrides; a destructive backstop runs first; an agent-declared "safe" class is advisory evidence and never authorizes execution. `SELECT` runs and `DROP` on the same query tool is rejected by inspecting the statement, closing a hole where a mutation declared read-only could reach the live API.
+- **Agent as brain, Rust as substrate.** The semantic judgments (naming entities, singularizing, guessing which field is an identifier, keyword risk classification, foreign-key-by-name) moved out of Rust to the agent. Identifier candidates are now captured at any depth by JSON pointer, closing multi-level hops (e.g. a company urn nested inside a person inside a saved search).
+- **Thinner generated skills.** `SKILL.md` now carries judgment, not schema: the usage narrative, the read-only playbook, identifier hops, safety classes, and confirmed edges. It drops the full field-type dump (schemas come back live from each tool's response), blank inferred relationships, repeated structure provenance, and empty "None established" sections — roughly 30–50% smaller with no loss of the deep hops or the usage narrative.
+
 ## [0.4.0] - 2026-07-11
 
 ### Added
