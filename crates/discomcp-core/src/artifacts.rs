@@ -370,7 +370,11 @@ fn render_skill(profile: &TargetProfile) -> String {
                 .iter()
                 .filter(|field| field.is_identifier)
                 .map(|field| {
-                    format!("`{}` ({})", field.name, evidence_label(&field.evidence.status))
+                    format!(
+                        "`{}` ({})",
+                        field.name,
+                        evidence_label(&field.evidence.status)
+                    )
                 })
                 .collect::<Vec<_>>();
             if ids.is_empty() {
@@ -426,7 +430,12 @@ fn render_skill(profile: &TargetProfile) -> String {
         .relationships
         .iter()
         .filter(|relationship| relationship.evidence.status == EvidenceStatus::Inferred)
-        .filter(|relationship| relationship.via_fields.iter().any(|field| !field.is_empty()))
+        .filter(|relationship| {
+            relationship
+                .via_fields
+                .iter()
+                .any(|field| !field.is_empty())
+        })
         .collect();
     if !inferred.is_empty() {
         output.push_str("\n## Inferred Relationships\n\n");
