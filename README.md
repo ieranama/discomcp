@@ -2,7 +2,7 @@
 
 # 🪩 DiscoMCP
 
-**Turn an unknown MCP into a reusable, workspace-aware operational skill for AI agents.**
+**Turn an unknown MCP server into a reusable, read-only skill your agent can actually use.**
 
 [![CI](https://github.com/ieranama/discomcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieranama/discomcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ieranama/discomcp?label=release)](https://github.com/ieranama/discomcp/releases)
@@ -11,48 +11,30 @@
 
 </div>
 
-No agent should walk onto the dance floor blind — DiscoMCP checks the room, learns the moves, and only then cuts in.
+A tool catalogue tells an agent *what* an MCP server exposes, not *how* to use it — which tools matter, which id in one response is the key to the next call, or which sequence answers a real question. So agents guess.
 
-DiscoMCP turns an unknown Model Context Protocol (MCP) connection into a reusable, workspace-aware operational skill for AI agents.
+DiscoMCP points your agent at an MCP server, lets it explore safely, and writes a `SKILL.md` that captures how that server is actually used — grounded in what it observed, with provenance. **Exploring is read-only by construction: it never modifies anything.**
 
-It connects to a target MCP, collects its declared capabilities and configured documentation, safely explores only permitted read or harmless computation paths, and produces a profile with a workspace-specific `SKILL.md`.
+## How it works
 
-DiscoMCP makes your agent be the one in the room you would like to dance with — not the one who shows up, starts flailing at every button on the mixing desk, and calls it improvisation. It learns the playlist first, asks before it touches the decks, and never, ever pulls the fire alarm to see what happens.
+| Step | What happens |
+| --- | --- |
+| **1. Inspect** | Read the server's declared tools, schemas, and docs. Nothing is called yet. |
+| **2. Explore** | Run only *provably-read* probes, following identifiers from one response into the next. |
+| **3. Record** | Every observation is stored with provenance — what was seen, and by which call. |
+| **4. Generate** | Write `SKILL.md`: the usage playbook, the identifier hops, and each tool's safety class. |
 
-The generated `SKILL.md` captures how **you** use that MCP — your read-only playbook, the identifier hops that chain one call into the next, the safety class of every tool — grounded in real observed responses with provenance, so your agent stops guessing.
+The result is a skill your agent loads instead of walking in blind.
 
-> **What it is / isn't.** DiscoMCP's value is *grounding* and a *provable read-only floor* for exploration — not token savings. Benchmarked honestly, the token story is noisy and we don't claim a number we can't defend. What we do guarantee: it lands your agent in the right tools with the right identifiers, and it never modifies anything while learning.
+## Read-only, guaranteed
 
-## Why DiscoMCP
+Exploration runs on a **default-deny gate**: a probe executes only when it is *provably* a read — the tool name is a read verb, the server marks it read-only, or (for a query tool) its argument parses as read-only SQL. A `SELECT` runs; a `DROP` on the *same* tool is rejected by inspecting the statement, not the name. A tool that merely *declares* itself safe never executes.
 
-An MCP tool catalogue alone does not explain how a particular user's accessible workspace is organized or which tool sequence solves a real task. DiscoMCP keeps the target catalogue internal, records evidence for every important claim, and generates an operational model that agents can use without guessing.
-
-The result answers questions such as:
-
-- What does this MCP expose, and what platform or data source does it represent?
-- Which tools are safe to call during discovery, and which require explicit confirmation later?
-- Which structures, fields, identifiers, and relationships were actually observed?
-- What workflow should an agent follow to answer a user request safely?
-- What remains uncertain?
-
-## Safety Contract
-
-**Exploring never writes.** DiscoMCP runs on a *default-deny* gate: a probe executes only when it is **provably a read** — the tool name is a read verb, the server marks it read-only, or (for a query tool) its argument parses as read-only SQL. A `SELECT` runs; a `DROP` on the *same* tool is rejected by inspecting the statement, not the tool name. A tool that merely *declares* itself safe, without proof, never executes.
-
-The model proposes probes; the deterministic runtime decides. Before any call touches the target it validates the tool, JSON arguments, identifier provenance, policy, budgets, response limits, and redaction — and always rejects tools classified as:
-
-- mutation
-- external side effect
-- destructive
-- administrative
-- arbitrary execution
-- unknown risk
-
-Sensitive reads are additionally constrained by the configured privacy policy. Secrets are redacted before logs, persistence, generated artifacts, and reasoning-provider requests.
+The runtime always rejects tools classified as mutation, external side effect, destructive, administrative, arbitrary execution, or unknown risk. Secrets are redacted before logs, artifacts, and any reasoning-provider request.
 
 ## Quick Start
 
-Run it with no install — `npx` fetches the right prebuilt binary for your platform:
+Run with no install — `npx` fetches the right prebuilt binary for your platform:
 
 ```bash
 npx @ieranama/discomcp --help
@@ -64,115 +46,75 @@ Or install the binary once (no Rust toolchain required):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.sh | sh
 ```
 
-(Windows: `powershell -ExecutionPolicy Bypass -c "irm https://github.com/ieranama/discomcp/releases/latest/download/discomcp-installer.ps1 | iex"`. All platform archives are on the [releases page](https://github.com/ieranama/discomcp/releases).)
-
-Point a config at any MCP server you can run locally over stdio — this is the whole file:
+Point a config at any MCP server — this is the whole file:
 
 ```toml
 [targets.example]
 transport = "stdio"
 command = "npx"
-args = ["-y", "example-mcp"]
+args = ["-y", "some-mcp-server"]
 
 [profiles]
 privacy_mode = "balanced"
 ```
 
-Then add DiscoMCP to your agent as a regular MCP server. Your agent is the brain; the DiscoMCP runtime enforces every safety check:
+Then add DiscoMCP to your agent as a regular MCP server and let it drive:
 
 ```bash
-claude mcp add discomcp -- discomcp serve --config ./discomcp.toml
+discomcp serve --config ./discomcp.toml
 ```
 
-The agent drives profiling through six tools — `list_targets`, `lookup_target`, `inspect_target`, `execute_probe`, `finalize_profile`, `generate_skill` — and the runtime validates every probe (risk class, argument schema, identifier provenance, budgets, redaction) before anything touches the target. Mutating, destructive, and administrative tools are always rejected during onboarding. `lookup_target` tells the agent whether a fresh skill already exists for the target's current catalogue, so exploration only runs when something actually changed.
+The agent profiles through a handful of tools — `list_targets`, `lookup_target`, `inspect_target`, `execute_probe`, `finalize_profile`, `generate_skill` — and the runtime validates every probe (risk class, argument schema, identifier provenance, budgets, redaction) before anything touches the target. `lookup_target` reports whether a fresh skill already exists, so exploration only runs when the catalogue actually changed.
 
-No agent connected? The standalone CLI does the same job with a configured reasoning backend (see [examples/config.toml](examples/config.toml)):
-
-```bash
-discomcp profile example \
-  --config ./examples/config.toml \
-  --mode standard \
-  --goal "Understand this MCP, safely explore my accessible workspace, and generate an operational skill"
-```
-
-Profiles are written below `.discomcp/profiles/<target-id>/`. The canonical outputs are:
-
-- `capability-profile.json`
-- `workspace-model.json`
-- `operational-model.json`
-
-`SKILL.md` and `AGENTS.md` are generated exports of that canonical state.
-
-## Configuration
-
-Start with [examples/config.toml](examples/config.toml). Targets are owned by DiscoMCP; it does not inherit servers from another agent host automatically. `stdio` launches a real MCP subprocess and communicates using newline-delimited JSON-RPC.
-
-```toml
-[targets.example]
-transport = "stdio"
-command = "npx"
-args = ["-y", "example-mcp"]
-docs = ["./docs/example-mcp.md"]
-
-[targets.example.env]
-EXAMPLE_API_KEY = "${EXAMPLE_API_KEY}"
-
-[reasoning]
-routing = "single"
-everyday_backend = "primary"
-
-[reasoning.backends.primary]
-type = "command"
-command = "some-agent-cli"
-args = ["exec", "--model", "{model}"]
-model = "your-configured-model"
-input = "stdin_json"
-output = "stdout_json"
-```
-
-### Remote servers (Streamable HTTP + OAuth)
-
-Point at a hosted MCP over Streamable HTTP; DiscoMCP handles the OAuth 2.0 flow (PKCE, loopback callback) and caches the token locally:
-
-```toml
-[targets.attio]
-transport = "http"
-url = "https://mcp.attio.com/mcp"
-
-[targets.attio.oauth]
-scopes = ["mcp", "offline_access", "openid"]
-```
-
-The command receives one serialized `ReasoningRequest` on stdin and must emit either a `ReasoningResponse` JSON object or the raw JSON value for its `output` on stdout. No target credentials or unredacted MCP response are interpolated into the command line.
-
-Environment interpolation fails clearly when a required variable is missing and never prints the resolved secret. Do not commit credentials, profile output containing sensitive workspace material, or `.env` files.
+Profiles are written under `.discomcp/profiles/<target-id>/`; `SKILL.md` is the generated skill.
 
 ## Evidence
 
-Every material claim in a generated profile carries one of these statuses:
+Every claim in a profile carries a status, so an agent never mistakes a guess for a fact:
 
 | Status | Meaning |
 | --- | --- |
 | `declared` | Exposed directly through MCP metadata, schemas, or annotations. |
 | `documented` | Found in configured or MCP-exposed documentation. |
-| `observed` | Confirmed by a successful permitted MCP call. |
-| `inferred` | Reasoned from declarations, documentation, and observations. |
+| `observed` | Confirmed by a successful, permitted MCP call. |
+| `inferred` | Reasoned from declarations, docs, and observations (carries confidence). |
 | `user_defined` | Explicitly supplied by the user. |
 | `unknown` | Insufficient evidence. |
-| `contradicted` | Relevant sources disagree. |
+| `contradicted` | Sources disagree. |
 
-Inferences include their confidence, supporting evidence, source references, and contradictions. DiscoMCP does not present an inferred relationship as an observed fact.
+## Configuration
+
+Targets are owned by DiscoMCP; it does not inherit servers from another agent host. `stdio` launches a local MCP subprocess; `http` connects to a hosted server over Streamable HTTP (with OAuth handled for you):
+
+```toml
+[targets.local]
+transport = "stdio"
+command = "npx"
+args = ["-y", "some-mcp-server"]
+
+[targets.local.env]
+SOME_API_KEY = "${SOME_API_KEY}"
+
+[targets.remote]
+transport = "http"
+url = "https://your-mcp-server.example/mcp"
+
+[targets.remote.oauth]
+scopes = ["read"]
+```
+
+Environment interpolation fails clearly when a variable is missing and never prints the resolved secret. Do not commit credentials or profile output containing sensitive workspace material.
+
+See [examples/config.toml](examples/config.toml) for a full example, including an optional reasoning backend for running DiscoMCP standalone without an agent host.
 
 ## Development
 
-Want to contribute, or run an unreleased change? Build from source instead of installing the binary.
-
-Prerequisites: Rust stable with `rustfmt` and `clippy`, and `cargo-audit` for the full local quality gate.
+Build from source to contribute or run an unreleased change. Prerequisites: Rust stable with `rustfmt` and `clippy`.
 
 ```bash
 git clone https://github.com/ieranama/discomcp.git
 cd discomcp
-cargo run -p discomcp -- profile example --config ./examples/config.toml --mode standard --goal "..."
+cargo test --all
 ```
 
 Run the local quality gate before opening a pull request:
@@ -181,16 +123,7 @@ Run the local quality gate before opening a pull request:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
-cargo audit
 ```
-
-Install the audit tool once if needed:
-
-```bash
-cargo install cargo-audit --locked
-```
-
-The repository includes a generic collection-oriented mock MCP fixture so tests do not require credentials or external services.
 
 ## Documentation
 
@@ -200,17 +133,8 @@ The repository includes a generic collection-oriented mock MCP fixture so tests 
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-
 ## License
 
-Licensed under either of
-
-- [Apache License, Version 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
-
-at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in DiscoMCP by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
